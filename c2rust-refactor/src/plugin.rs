@@ -1,16 +1,18 @@
 //! Simple plugin loading infrastructure.
 //!
 //! See PLUGINS.txt for more details on plugins.
-use libc::{dlopen, dlsym, RTLD_LAZY};
-use std::ffi::CString;
-use std::mem;
-use std::path::Path;
 
 use crate::command::Registry;
 
 /// Find the named plugins in the search path, and pass `reg` to each of their `register_commands`
 /// entry points.
+#[cfg(unix)]
 pub fn load_plugins(search_path: &[String], plugins: &[String], reg: &mut Registry) {
+    use std::ffi::CString;
+    use std::mem;
+    use std::path::Path;
+    use libc::{dlopen, dlsym, RTLD_LAZY};
+
     let sym_name = CString::new("register_commands").unwrap();
 
     for name in plugins {
@@ -50,3 +52,8 @@ pub fn load_plugins(search_path: &[String], plugins: &[String], reg: &mut Regist
         }
     }
 }
+#[cfg(windows)]
+pub fn load_plugins(_search_path: &[String], _plugins: &[String], _reg: &mut Registry) {
+    todo!("Will implement for Windows later, if desired")
+}
+
