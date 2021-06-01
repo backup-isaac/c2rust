@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Command;
 
@@ -11,7 +12,20 @@ fn process_ast(mode: &str, dest: &Path) {
         .arg(mode)
         .arg(dest)
         .spawn()
-        .expect("failed to run process_ast.py. Make sure python3 is in your PATH.");
+        .unwrap_or_else(|err| {
+            // Try python since that's how it is named by default on Windows
+            // TODO: check to make sure python --version is new enough?
+            (if err.kind() == ErrorKind::NotFound {
+                Command::new("python")
+                .arg("-B")
+                .arg("gen/process_ast.py")
+                .arg(mode)
+                .arg(dest)
+                .spawn()
+            } else {
+                Err(err)
+            }).expect("failed to run process_ast.py. Make sure python3 is in your PATH.")
+        });
 
     let ret = p.wait().expect("failed to wait on process_ast.py");
 

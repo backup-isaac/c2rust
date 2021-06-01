@@ -221,7 +221,12 @@ impl LLVMInfo {
                         Path::new(&d)
                             .join("../bin/llvm-config")
                             .canonicalize()
-                            .unwrap()
+                            .unwrap_or_else(|_| {
+                                Path::new(&d)
+                                    .join("..\\bin\\llvm-config.exe")
+                                    .canonicalize()
+                                    .unwrap()
+                            })
                             .to_string_lossy(),
                     )
                 }))
