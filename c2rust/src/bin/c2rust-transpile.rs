@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use c2rust_transpile::{Diagnostic, ReplaceMode, TranspilerConfig};
+use c2rust_transpile::{Diagnostic, EmitBuildFiles, ReplaceMode, TranspilerConfig};
 
 fn main() {
     let yaml = load_yaml!("../transpile.yaml");
@@ -98,7 +98,15 @@ fn main() {
         reduce_type_annotations: matches.is_present("reduce-type-annotations"),
         reorganize_definitions: matches.is_present("reorganize-definitions"),
         emit_modules: matches.is_present("emit-modules"),
-        emit_build_files: matches.is_present("emit-build-files"),
+        emit_build_files: {
+            if matches.is_present("force-emit-build-files") {
+                EmitBuildFiles::Always
+            } else if matches.is_present("emit-build-files") {
+                EmitBuildFiles::UnlessSkipped
+            } else {
+                EmitBuildFiles::No
+            }
+        },
         output_dir: matches.value_of("output-dir").map(PathBuf::from),
         binaries: matches
             .values_of("binary")
@@ -117,11 +125,11 @@ fn main() {
         log_level,
     };
     // binaries imply emit-build-files
-    if !tcfg.binaries.is_empty() {
-        tcfg.emit_build_files = true
+    if !tcfg.binaries.is_empty() && tcfg.emit_build_files == EmitBuildFiles::No {
+        tcfg.emit_build_files = EmitBuildFiles::UnlessSkipped;
     };
     // emit-build-files implies emit-modules
-    if tcfg.emit_build_files {
+    if tcfg.emit_build_files != EmitBuildFiles::No {
         tcfg.emit_modules = true
     };
 
