@@ -114,7 +114,7 @@ pub struct TranspilerConfig {
 
     // Options that control build files
     /// Emit `Cargo.toml` and `lib.rs`
-    pub emit_build_files: bool,
+    pub emit_build_files: EmitBuildFiles,
     /// Names of translation units containing main functions that we should make
     /// into binaries
     pub binaries: Vec<String>,
@@ -132,6 +132,13 @@ impl TranspilerConfig {
             |x| x.file_name().map(|x| x.to_string_lossy().into_owned())
         ).unwrap_or_else(|| "c2rust_out".into())
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EmitBuildFiles {
+    No,
+    UnlessSkipped,
+    Always
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -317,11 +324,15 @@ pub fn transpile(tcfg: TranspilerConfig, cc_db: &Path, extra_clang_args: &[&str]
         pragmas.sort();
         crates.sort();
 
-        if tcfg.emit_build_files {
+        if tcfg.emit_build_files != EmitBuildFiles::No {
             if modules_skipped {
-                // If we skipped a file, we may not have collected all required pragmas
-                warn!("Can't emit build files after incremental transpiler run; skipped.");
-                return;
+                if tcfg.emit_build_files == EmitBuildFiles::Always {
+                    warn!("Some files were skipped after incremental transpiler run, build files may be incomplete.");
+                } else {
+                    // If we skipped a file, we may not have collected all required pragmas
+                    warn!("Can't emit build files after incremental transpiler run; skipped.");
+                    return;
+                }
             }
 
             let ccfg = CrateConfig {
@@ -347,7 +358,7 @@ pub fn transpile(tcfg: TranspilerConfig, cc_db: &Path, extra_clang_args: &[&str]
         return;
     }
 
-    if tcfg.emit_build_files {
+    if tcfg.emit_build_files != EmitBuildFiles::No {
         let crate_file = emit_build_files(&tcfg, &build_dir, top_level_ccfg, Some(workspace_members));
         reorganize_definitions(&tcfg, &build_dir, crate_file)
             .unwrap_or_else(|e| warn!("Reorganizing definitions failed: {}", e));
