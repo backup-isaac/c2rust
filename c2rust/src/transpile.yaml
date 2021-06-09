@@ -121,6 +121,10 @@ args:
       short: e
       help: Emit Rust build files, i.e., Cargo.toml for a library (and one or more binaries if -b/--binary is given). Implies --emit-modules.
       takes_value: false
+  - force-emit-build-files:
+      long: force-emit-build-files
+      help: Emit Rust build files even if some compile commands were skipped. Implies --emit-modules and --emit-build-files.
+      takes_value: false
   - output-dir:
       long: output-dir
       short: o
