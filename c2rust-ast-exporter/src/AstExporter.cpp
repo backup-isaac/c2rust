@@ -2657,7 +2657,6 @@ Outputs process(int argc, const char *argv[], int *result) {
     MyFrontendActionFactory myFrontendActionFactory(&outputs);
 
     *result = Tool.run(&myFrontendActionFactory);
-    assert(outputs.size() == 1 && "Expected exactly one output.");
     return outputs;
 }
 
