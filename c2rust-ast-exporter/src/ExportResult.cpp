@@ -16,9 +16,11 @@ void ExportResult::resize(std::size_t n) {
     names = new char *[n];
     bytes = new std::uint8_t *[n];
     sizes = new std::size_t[n];
-    std::fill_n(names, n, nullptr);
-    std::fill_n(bytes, n, nullptr);
-    std::fill_n(sizes, n, 0);
+    if (n > 0) {
+        std::fill_n(names, n, nullptr);
+        std::fill_n(bytes, n, nullptr);
+        std::fill_n(sizes, n, 0);
+    }
     entries = n;
 }
 
