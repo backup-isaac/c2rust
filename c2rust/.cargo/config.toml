@@ -1,0 +1,4 @@
+[target.'cfg(windows)']
+rustflags = ["-C", "link-arg=/stack:10485760"]
+
+# TODO: pass corresponding link flag on cfg(unix)?
