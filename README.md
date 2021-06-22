@@ -36,7 +36,7 @@ C2Rust requires LLVM 6 or later with its corresponding clang compiler and librar
 - **Arch Linux:**
 
         pacman -S base-devel llvm clang cmake openssl python
-        
+
 - **NixOS / nix:**
 
         nix-shell
@@ -62,14 +62,14 @@ On OS X with Homebrew LLVM, you need to point the build system at the LLVM insta
 
 On Linux with Linuxbrew LLVM, you need to point the build system at the LLVM installation as follows:
 
-    LLVM_CONFIG_PATH=/home/linuxbrew/.linuxbrew/opt/llvm/bin/llvm-config cargo +nightly-2019-12-05 install c2rust    
+    LLVM_CONFIG_PATH=/home/linuxbrew/.linuxbrew/opt/llvm/bin/llvm-config cargo +nightly-2019-12-05 install c2rust
 
 Note: adjust `LLVM_CONFIG_PATH` accordingly if Linuxbrew was installed to your home directory.
 
-On Gentoo, you need to point the build system to the location of `libclang.so` 
+On Gentoo, you need to point the build system to the location of `libclang.so`
   and `llvm-config` as follows:
 
-    LLVM_CONFIG_PATH=/path/to/llvm-config LIBCLANG_PATH=/path/to/libclang.so cargo +nightly-2019-12-05 install c2rust 
+    LLVM_CONFIG_PATH=/path/to/llvm-config LIBCLANG_PATH=/path/to/libclang.so cargo +nightly-2019-12-05 install c2rust
 
 
 If you have trouble with building and installing, or want to build from the latest master, the [developer docs](docs/README-developers.md#building-with-system-llvm-libraries) provide more details on the build system.
@@ -80,7 +80,7 @@ If you'd like to check our recently developed features or you urgently require a
 you can install it directly from Git:
 
     cargo +nightly-2019-12-05 install --git https://github.com/immunant/c2rust.git c2rust
-   
+
 Please note that the master branch is under constant development and you may expirience issues or crashes.
 
 You should also set `LLVM_CONFIG_PATH` accordingly if required as described above.
@@ -130,7 +130,7 @@ file, as there are optimization builtins which we do not support translating.
 
 When creating the initial build directory with cmake specify
 `-DCMAKE_EXPORT_COMPILE_COMMANDS=1`. This only works on projects
-configured to be built by `cmake`. This works on Linux and MacOS.
+configured to be built by `cmake`.
 
     cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=1 ...
 
@@ -162,23 +162,39 @@ To report issues with translation or refactoring, please use our [Issue Tracker]
 
 To reach the development team, join our [discord channel](https://discord.gg/ANSrTuu) or email us at [c2rust@immunant.com](mailto:c2rust@immunant.com).
 
+
+## Windows Support
+The translator and refactoring tool can run on Windows and produce Rust that compiles and runs. However, C2Rust support for Windows is not complete. These are known limitations on Windows:
+- Plugin support in the refactoring tool is currently disabled.
+- The test suite has not been ported.
+- The translator may make incorrect assumptions about platform-specific elements of C programs.
+
+### Installation
+Like on other platforms, C2Rust requires LLVM 6 or later with its corresponding clang compiler and libraries, Python 3.4 or later, and CMake 3.4.3 or later. [Download and build LLVM from source](https://releases.llvm.org/download.html). Similarly, set the `LLVM_CONFIG_PATH` environment variable to `<path to LLVM>\build\bin\llvm-config.exe` and then C2Rust can be built in the same manner as other platforms.
+
+On Windows, both `intercept-build` and CMake work to generate `compile_commands.json`. However, CMake will ignore `-DCMAKE_EXPORT_COMPILE_COMMANDS=1` for generators other than [Ninja](https://ninja-build.org/) or Makefiles, so CMake should be invoked like:
+
+    cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -G Ninja ...
+
+Note that C2Rust still uses the Clang front end, so `compile_commands.json` should be generated accordingly.
+
 ## FAQ
 
 > I translated code on platform X but it didn't work correctly on platform Y
 
-We run the C preprocessor before translation to Rust. This specializes the code to the host platform. For this reason, we do not support cross compiling translated code at the moment. 
+We run the C preprocessor before translation to Rust. This specializes the code to the host platform. For this reason, we do not support cross compiling translated code at the moment.
 
 > What platforms can C2Rust be run on?
 
-The translator and refactoring tool support both macOS and Linux. Other features, such as cross checking the functionality between C and Rust code, are currently limited to Linux hosts. 
+The translator and refactoring tool support both macOS and Linux. Windows support is in progress. Other features, such as cross checking the functionality between C and Rust code, are currently limited to Linux hosts.
 
 ## Acknowledgements and Licensing
 
 This material is available under the BSD-3 style license as found in the
 [LICENSE](LICENSE) file.
 
-The C2Rust translator is inspired by Jamey Sharp's [Corrode](https://github.com/jameysharp/corrode) translator. We rely on 
-[Emscripten](https://github.com/kripken/emscripten)'s 
+The C2Rust translator is inspired by Jamey Sharp's [Corrode](https://github.com/jameysharp/corrode) translator. We rely on
+[Emscripten](https://github.com/kripken/emscripten)'s
 Relooper algorithm to translate arbitrary C control flows.
 
 This material is based upon work supported by the United States Air Force and
