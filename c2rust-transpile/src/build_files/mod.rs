@@ -98,6 +98,8 @@ pub fn emit_build_files<'lcmd>(
     }
     crate_cfg.and_then(|ccfg| {
         emit_build_rs(tcfg, &reg, &build_dir, ccfg.link_cmd);
+        // this is needed to escape things like backslashes in Windows paths
+        reg.register_escape_fn(|s| s.escape_debug().to_string());
         emit_lib_rs(tcfg, &reg, &build_dir, ccfg.modules, ccfg.pragmas, &ccfg.crates)
     })
 }
