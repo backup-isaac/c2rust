@@ -54,6 +54,6 @@ pub fn load_plugins(search_path: &[String], plugins: &[String], reg: &mut Regist
 }
 #[cfg(windows)]
 pub fn load_plugins(_search_path: &[String], _plugins: &[String], _reg: &mut Registry) {
-    todo!("Will implement for Windows later, if desired")
+    // todo!("Will implement for Windows later, if desired")
 }
 
