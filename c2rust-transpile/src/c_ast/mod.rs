@@ -296,6 +296,10 @@ impl TypedAstContext {
                     CDeclKind::Typedef { name: nam, typ: ty, .. } => {
                         if nam == "__builtin_va_list" {
                             true
+                        } else if let CTypeKind::Pointer(CQualTypeId { ctype: pointee, .. }) = self.index(ty.ctype).kind {
+                            nam == "va_list" &&
+                                self.va_list_kind == BuiltinVaListKind::CharPtrBuiltinVaList &&
+                                self.index(pointee).kind == CTypeKind::Char
                         } else {
                             self.is_builtin_va_list(ty.ctype)
                         }
@@ -338,6 +342,11 @@ impl TypedAstContext {
         match self.va_list_kind {
             BuiltinVaListKind::CharPtrBuiltinVaList | BuiltinVaListKind::VoidPtrBuiltinVaList
             | BuiltinVaListKind::X86_64ABIBuiltinVaList => {
+                // on Windows, we may have to handle `typedef char *va_list;` so we must check for the
+                // typedef before calling resolve_type() at all
+                if self.is_builtin_va_list(typ) {
+                    return true;
+                }
                 match self.resolve_type(typ).kind {
                     CTypeKind::Pointer(CQualTypeId { ctype, .. })
                     | CTypeKind::ConstantArray(ctype, _) => {
