@@ -48,6 +48,9 @@ where
     let mut cmd_path = cmd_path.as_path().canonicalize().unwrap();
     cmd_path.pop(); // remove current executable
     cmd_path.push(format!("c2rust-{}", subcommand));
+    if cfg!(windows) {
+        cmd_path.set_extension("exe");
+    }
     assert!(cmd_path.exists(), format!("{:?} is missing", cmd_path));
     exit(
         Command::new(cmd_path.into_os_string())
