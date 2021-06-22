@@ -30,5 +30,5 @@
 	url = https://github.com/immunant/tinycc-rs.git
 [submodule "c2rust-ast-exporter/src/tinycbor"]
 	path = c2rust-ast-exporter/src/tinycbor
-	url = https://github.com/danewalton/tinycbor.git
+	url = https://mscodehub.visualstudio.com/Rust/_git/oss.tinycbor
 	branch = cmake

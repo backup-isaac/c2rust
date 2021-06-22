@@ -6,7 +6,7 @@ extern crate env_logger;
 use cmake::Config;
 use std::env;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use std::process::{self, Command, Stdio};
 
 // Use `cargo build -vv` to get detailed output on this script's progress.
@@ -92,7 +92,7 @@ fn generate_bindings() -> Result<(), &'static str> {
         .derive_default(true)
         // Tell bindgen we are processing c++
         .clang_arg("-xc++")
-        .clang_arg("-std=c++11")
+        .clang_arg("-std=c++14")
         // Finish the builder and generate the bindings.
         .generate()
         .or(Err("Unable to generate ExportResult bindings"))?;
@@ -133,10 +133,21 @@ fn build_native(llvm_info: &LLVMInfo) {
                 .build_target("clangAstExporter")
                 .build();
 
-            let out_dir = dst.display();
+            let build_out_dir = dst.join("build");
+
             // Set up search path for newly built tinycbor.a and libclangAstExporter.a
-            println!("cargo:rustc-link-search=native={}/build/tinycbor", out_dir);
-            println!("cargo:rustc-link-search=native={}/build", out_dir);
+            println!("cargo:rustc-link-search=native={}", (if cfg!(target_os = "windows") {
+                // TODO: Why does this "Debug" subdirectory appear on Windows? Is it something to do with CMake?
+                // I expect this might change depending on build type...
+                build_out_dir.join("tinycbor").join("Debug")
+            } else {
+                build_out_dir.join("tinycbor")
+            }).display());
+            println!("cargo:rustc-link-search=native={}", (if cfg!(target_os = "windows") {
+                build_out_dir.join("Debug")
+            } else {
+                build_out_dir
+            }).display());
         }
     };
 
@@ -146,8 +157,8 @@ fn build_native(llvm_info: &LLVMInfo) {
 
     println!("cargo:rustc-link-search=native={}", llvm_lib_dir);
 
-    // Some distro's, including arch and Fedora, no longer build with 
-    // BUILD_SHARED_LIBS=ON; programs linking to clang are required to 
+    // Some distro's, including arch and Fedora, no longer build with
+    // BUILD_SHARED_LIBS=ON; programs linking to clang are required to
     // link to libclang-cpp.so instead of individual libraries.
     let use_libclang = if cfg!(target_os = "macos") {
         false
@@ -194,6 +205,8 @@ fn build_native(llvm_info: &LLVMInfo) {
     // Link against the C++ std library.
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-lib=c++");
+    } else if cfg!(target_os = "windows") {
+        println!("cargo:rustc-link-lib=Version");
     } else {
         println!("cargo:rustc-link-lib=stdc++");
     }
@@ -379,14 +392,19 @@ impl LLVMInfo {
         if llvm_major_version >= 10 {
             args.push("FrontendOpenMP");
         }
-    
+
         let mut libs: Vec<String> = invoke_command(
             llvm_config.as_ref(),
             &args,
         )
             .unwrap_or("-lLLVM".to_string())
             .split_whitespace()
-            .map(|lib| String::from(lib.trim_start_matches("-l")))
+            .map(|lib| String::from(
+                lib.trim_start_matches("-l")
+                    .trim_end_matches(".lib")
+                    .split(&MAIN_SEPARATOR.to_string())
+                    .last().unwrap_or(lib)
+            ))
             .collect();
 
         libs.extend(
@@ -401,7 +419,10 @@ impl LLVMInfo {
                 ))
                 .unwrap_or(String::new())
                 .split_whitespace()
-                .map(|lib| String::from(lib.trim_start_matches("-l")))
+                .map(|lib| String::from(
+                    lib.trim_start_matches("-l")
+                        .trim_end_matches(".lib")
+                ))
         );
 
         Self {

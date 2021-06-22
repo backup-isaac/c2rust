@@ -38,6 +38,11 @@
 #include "ast_tags.hpp"
 #include "cbor.h"
 
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 using namespace llvm;
 using namespace clang;
 using namespace clang::tooling;
@@ -74,10 +79,17 @@ void cbor_encode_string_array(CborEncoder *encoder,
 }
 
 std::string make_realpath(std::string const &path) {
+    #ifdef _WIN32
+    char abs_path[MAX_PATH];
+    // Unlike the Unix-y realpath(), GetFullPathName does not resolve symlinks. Would this be an issue?
+    if (GetFullPathNameA(path.c_str(), sizeof(abs_path), abs_path, nullptr)) {
+        return std::string(abs_path);
+    #else
     if (auto abs_path = realpath(path.c_str(), nullptr)) {
         auto result = std::string(abs_path);
         free(abs_path);
         return result;
+    #endif
     } else {
         std::cerr << "make_realpath: File not found: " << path << std::endl;
         abort();
@@ -1111,7 +1123,7 @@ class TranslateASTVisitor final
 #else // CLANG_VERSION_MAJOR >= 7
             auto ExpansionRange = Mgr.getImmediateExpansionRange(Begin);
 #endif
-            curMacroExpansionSource = 
+            curMacroExpansionSource =
                 Lexer::getSourceText(ExpansionRange, Mgr, Context->getLangOpts());
         }
 
@@ -2476,11 +2488,11 @@ class TranslateConsumer : public clang::ASTConsumer {
                                             raw_text.size());
                     cbor_encoder_close_container(&array, &entry);
                 }
-            } else { 
+            } else {
                 // this happens when the C file contains no comments
                 cbor_encoder_create_array(&outer, &array, 0);
             }
-#endif // CLANG_VERSION_MAJOR >= 10              
+#endif // CLANG_VERSION_MAJOR >= 10
             cbor_encoder_close_container(&outer, &array);
 
             // 5. Target VaList type as BuiltiVaListKind
@@ -2515,12 +2527,12 @@ class TranslateAction : public clang::ASTFrontendAction {
     virtual std::unique_ptr<clang::ASTConsumer>
     CreateASTConsumer(clang::CompilerInstance &Compiler,
                       llvm::StringRef InFile) {
-        
+
 #if CLANG_VERSION_MAJOR < 10
         const InputKind::Language lang_c = InputKind::Language::C;
 #else
         const Language lang_c = Language::C;
-#endif // CLANG_VERSION_MAJOR    
+#endif // CLANG_VERSION_MAJOR
         if(this->getCurrentFileKind().getLanguage() != lang_c) {
             return nullptr;
         }

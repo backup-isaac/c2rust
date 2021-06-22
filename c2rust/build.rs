@@ -19,7 +19,8 @@ fn main() {
 
     let mut rustlib_path = PathBuf::new();
     rustlib_path.push(sysroot);
-    rustlib_path.push("lib/rustlib");
+    rustlib_path.push("lib");
+    rustlib_path.push("rustlib");
     rustlib_path.push(env::var("TARGET").unwrap());
     rustlib_path.push("lib");
     let path_string = rustlib_path

@@ -41,7 +41,11 @@ add_definitions(-DCLANG_VERSION_STRING="${LLVM_PACKAGE_VERSION}")
 set(LLVM_LINK_COMPONENTS support)
 
 # LLVM is not always built with RTTI, we don't need it either.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Windows")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /GR-")
+else()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
+endif()
 
 # The executable
 add_executable(c2rust-ast-exporter ${AST_EXPORTER_BIN_SRCS})
