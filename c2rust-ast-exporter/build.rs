@@ -134,9 +134,8 @@ fn build_native(llvm_info: &LLVMInfo) {
                 .build();
 
             let out_dir = dst.display();
-
             // Set up search path for newly built tinycbor.a and libclangAstExporter.a
-            println!("cargo:rustc-link-search=native={}/build/lib", out_dir);
+            println!("cargo:rustc-link-search=native={}/build/tinycbor", out_dir);
             println!("cargo:rustc-link-search=native={}/build", out_dir);
         }
     };

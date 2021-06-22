@@ -28,3 +28,7 @@
 [submodule "examples/tinycc/repo"]
 	path = examples/tinycc/repo
 	url = https://github.com/immunant/tinycc-rs.git
+[submodule "c2rust-ast-exporter/src/tinycbor"]
+	path = c2rust-ast-exporter/src/tinycbor
+	url = https://github.com/danewalton/tinycbor.git
+	branch = cmake

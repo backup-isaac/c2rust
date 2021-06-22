@@ -4,29 +4,7 @@ project(ASTExporter)
 #################################################
 # TinyCBOR                                      #
 #################################################
-set(TINYCBOR_URL "https://github.com/intel/tinycbor/archive/v0.5.3.tar.gz"
-    CACHE STRING "tinycbor download URL")
-set(TINYCBOR_MD5 "2cd3af70d8749a7ddd5a8d04d09ea8f6" CACHE STRING "tinycbor archive md5 sum")
-set(TINYCBOR_PREFIX "${CMAKE_BINARY_DIR}/tinycbor" CACHE STRING "tinycbor install prefix")
-
-include(ExternalProject)
-ExternalProject_Add(tinycbor_build
-            PREFIX ${TINYCBOR_PREFIX}
-            INSTALL_DIR ${CMAKE_BINARY_DIR}
-            URL ${TINYCBOR_URL}
-            URL_HASH MD5=${TINYCBOR_MD5}
-            CONFIGURE_COMMAND ""
-            BUILD_COMMAND make --quiet prefix=<INSTALL_DIR> CFLAGS=-fPIC
-            INSTALL_COMMAND make --quiet prefix=<INSTALL_DIR> install            
-            BUILD_IN_SOURCE 1
-            BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/lib/libtinycbor.a
-)
-
-include_directories(${CMAKE_BINARY_DIR}/include)
-
-add_library(tinycbor STATIC IMPORTED)
-set_target_properties(tinycbor PROPERTIES IMPORTED_LOCATION ${CMAKE_BINARY_DIR}/lib/libtinycbor.a)
-add_dependencies(tinycbor tinycbor_build)
+add_subdirectory(tinycbor)
 
 set(AST_EXPORTER_SRCS
   AstExporter.cpp

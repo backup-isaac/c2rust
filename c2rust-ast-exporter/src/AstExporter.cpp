@@ -36,7 +36,7 @@
 #include "ExportResult.hpp"
 #include "FloatingLexer.h"
 #include "ast_tags.hpp"
-#include <tinycbor/cbor.h>
+#include "cbor.h"
 
 using namespace llvm;
 using namespace clang;
