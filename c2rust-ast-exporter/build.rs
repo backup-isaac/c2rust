@@ -8,6 +8,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use std::process::{self, Command, Stdio};
+use std::str::FromStr;
 
 // Use `cargo build -vv` to get detailed output on this script's progress.
 
@@ -135,16 +136,54 @@ fn build_native(llvm_info: &LLVMInfo) {
 
             let build_out_dir = dst.join("build");
 
+            // This logic is implemented inside `cmake`, but there is no public method to get profile()
+            // from the Config struct for `cmake` versions below 0.1.44. Hence it is duplicated here
+            // until `cmake` >= 0.1.44 is required.
+            enum OptLevel {
+                Debug, Release, Size
+            };
+            let cmake_opt_level = match env::var("OPT_LEVEL").unwrap_or("".to_string()).as_str() {
+                "0" => OptLevel::Debug,
+                "1" => OptLevel::Release,
+                "2" => OptLevel::Release,
+                "3" => OptLevel::Release,
+                "s" => OptLevel::Size,
+                "z" => OptLevel::Size,
+                _ => {
+                    eprintln!("OPT_LEVEL unset or invalid, inferring CMake build type from PROFILE");
+                    match env::var("PROFILE").unwrap_or("".to_string()).as_str() {
+                        "debug" => OptLevel::Debug,
+                        "bench" => OptLevel::Release,
+                        "release" => OptLevel::Release,
+                        _ => {
+                            eprintln!("PROFILE unset or invalid, assuming release build");
+                            OptLevel::Release
+                        }
+                    }
+                }
+            };
+            let cmake_debug_info= bool::from_str(
+                &env::var("DEBUG")
+                    .unwrap_or_else(|_| {
+                        eprintln!("DEBUG unset or invalid, assuming debug info is on");
+                        "true".to_string()
+                    })
+            ).unwrap_or(true);
+            let cmake_profile = match (cmake_opt_level, cmake_debug_info) {
+                (OptLevel::Debug, _) => "Debug",
+                (OptLevel::Release, false) => "Release",
+                (OptLevel::Release, true) => "RelWithDebInfo",
+                (OptLevel::Size, _) => "MinSizeRel",
+            };
+
             // Set up search path for newly built tinycbor.a and libclangAstExporter.a
             println!("cargo:rustc-link-search=native={}", (if cfg!(target_os = "windows") {
-                // TODO: Why does this "Debug" subdirectory appear on Windows? Is it something to do with CMake?
-                // I expect this might change depending on build type...
-                build_out_dir.join("tinycbor").join("Debug")
+                build_out_dir.join("tinycbor").join(cmake_profile)
             } else {
                 build_out_dir.join("tinycbor")
             }).display());
             println!("cargo:rustc-link-search=native={}", (if cfg!(target_os = "windows") {
-                build_out_dir.join("Debug")
+                build_out_dir.join(cmake_profile)
             } else {
                 build_out_dir
             }).display());
