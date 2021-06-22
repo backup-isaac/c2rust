@@ -3098,7 +3098,7 @@ impl<'c> Translation<'c> {
                 Err(TranslationError::generic("convert vector not supported"))
             }
 
-            CExprKind::UnaryType(_ty, kind, opt_expr, arg_ty) => {
+            CExprKind::UnaryType(ty, kind, opt_expr, arg_ty) => {
                 let result = match kind {
                     UnTypeOp::SizeOf => match opt_expr {
                         None => self.compute_size_of_type(ctx, arg_ty.ctype)?,
@@ -3118,7 +3118,8 @@ impl<'c> Translation<'c> {
                     UnTypeOp::PreferredAlignOf => self.compute_align_of_type(arg_ty.ctype, true)?,
                 };
 
-                Ok(result.map(|x| mk().cast_expr(x, mk().path_ty(vec!["libc", "c_ulong"]))))
+                let result_ty = self.convert_type(ty.ctype)?;
+                Ok(result.map(|x| mk().cast_expr(x, result_ty)))
             }
 
             CExprKind::ConstantExpr(_ty, child, value) => {
