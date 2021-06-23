@@ -15,7 +15,6 @@
 //! its callees and simplifying to produce a complete summary for the current function.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::u32;
 
 use arena::SyncDroplessArena;
@@ -24,14 +23,14 @@ use rustc::hir;
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::hir::{Mutability, Node};
 use rustc::ty::{TyCtxt, TyKind, TypeAndMut, TyS};
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_index::vec::IndexVec;
 use syntax::ast::IntTy;
 use syntax::source_map::Span;
 
-use crate::analysis::labeled_ty::{LabeledTy, LabeledTyCtxt};
+use crate::analysis::labeled_ty::{FnSig, LabeledTy, LabeledTyCtxt};
+use crate::analysis::ty::{is_fn, Var};
 use crate::command::CommandState;
 use crate::context::HirMap;
-use crate::type_map;
 use crate::RefactorCtxt;
 
 mod annot;
@@ -57,30 +56,6 @@ use self::mono::compute_all_mono_sigs;
 use self::mono_filter::filter_suspicious_monos;
 */
 use self::debug::*;
-
-/// A variable index.
-///
-/// There are multiple kinds of variables using the same index type, so the variable kind must be
-/// known by other means to use this effectively.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub struct Var(pub u32);
-
-impl Idx for Var {
-    fn new(idx: usize) -> Var {
-        assert!(idx as u32 as usize == idx);
-        Var(idx as u32)
-    }
-
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-impl Var {
-    fn next(self) -> Self {
-        Var(self.0 + 1)
-    }
-}
 
 /// A permission variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,65 +84,12 @@ pub enum PermVar {
 pub type LTy<'lty, 'tcx> = LabeledTy<'lty, 'tcx, Option<PermVar>>;
 type LFnSig<'lty, 'tcx> = FnSig<'lty, 'tcx, Option<PermVar>>;
 
-/// A generic labeled function signature.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct FnSig<'lty, 'tcx, L: 'lty> {
-    pub inputs: &'lty [LabeledTy<'lty, 'tcx, L>],
-    pub output: LabeledTy<'lty, 'tcx, L>,
-    pub is_variadic: bool,
-}
-
 /// One of the concrete permission values, READ, WRITE, or MOVE.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum ConcretePerm {
     Read,
     Write,
     Move,
-}
-
-impl<'lty, 'tcx, L: fmt::Debug> type_map::Signature<LabeledTy<'lty, 'tcx, L>>
-    for FnSig<'lty, 'tcx, L>
-{
-    fn num_inputs(&self) -> usize {
-        self.inputs.len()
-    }
-
-    fn input(&self, idx: usize) -> LabeledTy<'lty, 'tcx, L> {
-        self.inputs[idx]
-    }
-
-    fn output(&self) -> LabeledTy<'lty, 'tcx, L> {
-        self.output
-    }
-}
-
-/// Check if a definition is a `fn` item of some sort.  Note that this does not return true on
-/// closures.
-fn is_fn(hir_map: &hir::map::Map, def_id: DefId) -> bool {
-    let n = match hir_map.get_if_local(def_id) {
-        None => return false,
-        Some(n) => n,
-    };
-
-    match n {
-        Node::Item(i) => match i.kind {
-            hir::ItemKind::Fn(..) => true,
-            _ => false,
-        },
-        Node::ForeignItem(i) => match i.kind {
-            hir::ForeignItemKind::Fn(..) => true,
-            _ => false,
-        },
-        Node::TraitItem(i) => match i.kind {
-            hir::TraitItemKind::Method(..) => true,
-            _ => false,
-        },
-        Node::ImplItem(i) => match i.kind {
-            hir::ImplItemKind::Method(..) => true,
-            _ => false,
-        },
-        _ => false,
-    }
 }
 
 /// Run the intraprocedural step of polymorphic signature inference.  Results are written back into

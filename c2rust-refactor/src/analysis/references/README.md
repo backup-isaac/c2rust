@@ -1,0 +1,4 @@
+The `analysis::references` module complements `analysis::ownership` to achieve the goal of taking code that uses raw pointers and inferring which pointers can be changed to safe `&`, `&mut`, or `Box` references. This analysis detects if pointers are used in ways that would prevent conversion to a safe reference. Specifically, the ways in which a raw pointer `p` can be unsuitable for conversion to a reference are:
+- `p.offset()` is called. This may imply array- or slice-like usage, or it may imply an internal or self-referential pointer.
+- `p` is assigned a value that is not a pointer, reference, or constant `0`. For instance, `p = SOME_MAGIC_ADDR as *mut T`
+- `p` is compared to another pointer using `< <= >= >`
