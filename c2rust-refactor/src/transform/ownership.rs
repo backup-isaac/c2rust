@@ -15,9 +15,10 @@ use smallvec::{smallvec, SmallVec};
 
 use crate::ast_manip::{MutVisitNodes, MutVisit};
 use crate::ast_manip::fn_edit::flat_map_fns;
-use crate::analysis::labeled_ty::LabeledTyCtxt;
-use crate::analysis::ownership::{self, ConcretePerm, Var, PTy};
+use crate::analysis::labeled_ty::{FnSig, LabeledTyCtxt};
+use crate::analysis::ownership::{self, ConcretePerm, PTy};
 use crate::analysis::ownership::constraint::{ConstraintSet, Perm};
+use crate::analysis::ty::Var;
 use crate::command::{CommandState, Registry, DriverCommand};
 use crate::context::HirMap;
 use crate::driver::{Phase};
@@ -547,7 +548,7 @@ fn do_mark_pointers(st: &CommandState, cx: &RefactorCtxt) {
                         None
                     }
                 };
-                ownership::FnSig {
+                FnSig {
                     inputs: lcx.relabel_slice(fr.sig.inputs, &mut f),
                     output: lcx.relabel(fr.sig.output, &mut f),
                     is_variadic: fr.sig.is_variadic,

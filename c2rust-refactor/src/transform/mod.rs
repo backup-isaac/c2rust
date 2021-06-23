@@ -63,6 +63,7 @@ transform_modules! {
     literals,
     reorganize_definitions,
     ownership,
+    references,
     retype,
     rewrite,
     statics,

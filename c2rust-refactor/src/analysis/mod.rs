@@ -9,7 +9,9 @@ use c2rust_ast_builder::IntoSymbol;
 
 pub mod labeled_ty;
 pub mod ownership;
+pub mod references;
 pub mod type_eq;
+pub mod ty; // revisit -- may want to separate into >1 module
 
 /// # `test_analysis_type_eq` Command
 ///
@@ -40,6 +42,23 @@ fn register_test_analysis_ownership(reg: &mut Registry) {
             let arena = SyncDroplessArena::default();
             let results = ownership::analyze(&st, &cx, &arena);
             ownership::dump_results(&cx, &results);
+        }))
+    });
+}
+
+/// # `test_analysis_references` Command
+///
+/// Test command - not intended for general use.
+///
+/// Usage: `test_analysis_references`
+///
+/// Runs the `references` analysis and dumps the results to stderr.
+fn register_test_analysis_references(reg: &mut Registry) {
+    reg.register("test_analysis_references", |_| {
+        Box::new(DriverCommand::new(Phase::Phase3, move |st, cx| {
+            let arena = SyncDroplessArena::default();
+            let results = references::analyze(&st, &cx, &arena);
+            references::dump_results(&cx, &results);
         }))
     });
 }
@@ -94,5 +113,6 @@ fn register_mark_related_types(reg: &mut Registry) {
 pub fn register_commands(reg: &mut Registry) {
     register_test_analysis_type_eq(reg);
     register_test_analysis_ownership(reg);
+    register_test_analysis_references(reg);
     register_mark_related_types(reg);
 }

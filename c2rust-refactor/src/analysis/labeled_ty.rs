@@ -252,3 +252,28 @@ impl<'lty, 'tcx, L: fmt::Debug> type_map::Type for LabeledTy<'lty, 'tcx, L> {
         self.args[idx]
     }
 }
+
+/// A generic labeled function signature.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FnSig<'lty, 'tcx, L: 'lty> {
+    pub inputs: &'lty [LabeledTy<'lty, 'tcx, L>],
+    pub output: LabeledTy<'lty, 'tcx, L>,
+    pub is_variadic: bool,
+}
+
+
+impl<'lty, 'tcx, L: fmt::Debug> type_map::Signature<LabeledTy<'lty, 'tcx, L>>
+    for FnSig<'lty, 'tcx, L>
+{
+    fn num_inputs(&self) -> usize {
+        self.inputs.len()
+    }
+
+    fn input(&self, idx: usize) -> LabeledTy<'lty, 'tcx, L> {
+        self.inputs[idx]
+    }
+
+    fn output(&self) -> LabeledTy<'lty, 'tcx, L> {
+        self.output
+    }
+}
