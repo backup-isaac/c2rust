@@ -12,7 +12,11 @@ use crate::command::CommandState;
 use crate::context::HirMap;
 use crate::RefactorCtxt;
 
+mod context;
 mod intra;
+
+use self::context::Ctxt;
+use self::intra::IntraCtxt;
 
 pub type RefLike = bool;
 
@@ -22,7 +26,7 @@ pub type RefdTy<'lty, 'tcx> = LabeledTy<'lty, 'tcx, Option<RefLike>>;
 pub type RefdFnSig<'lty, 'tcx> = FnSig<'lty, 'tcx, Option<RefLike>>;
 
 fn analyze_intra<'a, 'tcx, 'lty>(
-    // _cx: &mut Ctxt<'lty, 'tcx>,
+    cx: &mut Ctxt<'lty, 'tcx>,
     hir_map: &HirMap<'a, 'tcx>,
     tcx: TyCtxt<'tcx>,
 ) {
@@ -32,11 +36,13 @@ fn analyze_intra<'a, 'tcx, 'lty>(
         }
 
         let mir = tcx.optimized_mir(def_id);
+        let mut local_cx = IntraCtxt::new(cx, def_id, mir);
 
-        // another layer of context?
         for (bbid, bb) in mir.basic_blocks().iter_enumerated() {
-            intra::handle_basic_block(bbid, bb);
+            local_cx.handle_basic_block(bbid, bb);
         }
+
+        local_cx.finish();
     }
 }
 
@@ -45,16 +51,13 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
     dcx: &RefactorCtxt<'a, 'tcx>,
     arena: &'lty SyncDroplessArena
 ) -> AnalysisResult<'lty, 'tcx> {
+    let mut cx = Ctxt::new(dcx.ty_ctxt(), arena);
     // TODO: handle provided annotations and marks
 
     // This analysis is entirely local. Unsure if attempting to
     // analyze across functions is even useful here
-    analyze_intra(/*&mut dcx,*/ &dcx.hir_map(), dcx.ty_ctxt());
-    AnalysisResult {
-        statics: HashMap::new(),
-        functions: HashMap::new(),
-        arena,
-    }
+    analyze_intra(&mut cx, &dcx.hir_map(), dcx.ty_ctxt());
+    cx.into()
 }
 
 /// The collected results of running the analysis.
@@ -83,7 +86,36 @@ pub struct FunctionResult<'lty, 'tcx: 'lty> {
     pub locals: HashMap<Span, RefdTy<'lty, 'tcx>>,
 }
 
+impl<'lty, 'tcx> From<Ctxt<'lty, 'tcx>> for AnalysisResult<'lty, 'tcx> {
+    fn from(cx: Ctxt<'lty, 'tcx>) -> AnalysisResult<'lty, 'tcx> {
+        AnalysisResult {
+            statics: cx.statics,
+            functions: cx.functions,
+            arena: cx.arena,
+        }
+    }
+}
+
 /// Print the analysis results to stderr, for debugging.
-pub fn dump_results(_dcx: &RefactorCtxt, _results: &AnalysisResult) {
-    eprintln!("references dump_results");
+pub fn dump_results(dcx: &RefactorCtxt, results: &AnalysisResult) {
+    debug!("\n === summary ===");
+
+    let path_str = |def_id| dcx.ty_ctxt().def_path(def_id).to_string_no_crate();
+
+    let mut ids = results.statics.keys().cloned().collect::<Vec<_>>();
+    ids.sort();
+    for id in ids {
+        let ty = results.statics[&id];
+        debug!("static {} :: {:?}", path_str(id), ty);
+    }
+
+    let mut ids = results.functions.keys().cloned().collect::<Vec<_>>();
+    ids.sort();
+    for id in ids {
+        let fr = &results.functions[&id];
+        debug!("func {} :: {:?} :: locals:", path_str(id), fr.sig);
+        for (span, lty) in fr.locals.iter() {
+            debug!("    {:?} :: {:?}", span, lty);
+        }
+    }
 }
