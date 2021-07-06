@@ -71,8 +71,8 @@ fn do_mark_pointers(st: &CommandState, cx: &RefactorCtxt) {
     };
 
     type_map::map_types(&cx.hir_map(), source, &st.krate(), |_source, ast_ty, lty| {
-        if let Some(_) = lty.label {
-            // TODO: check mark
+        if let Some(true) = lty.label {
+            // TODO: set mark if false? Use >1 mark type if false?
             st.add_mark(ast_ty.id, "ref".into_symbol());
         }
     });
