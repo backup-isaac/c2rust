@@ -4,6 +4,7 @@ use rustc::mir::interpret::{ConstValue, Scalar};
 use rustc::ty::{ConstKind, Ty, TyKind, TyS};
 use rustc_index::vec::IndexVec;
 use syntax::source_map::{DUMMY_SP, Spanned};
+use syntax::symbol::Symbol;
 
 use super::{RefdTy, RefLike};
 use super::context::Ctxt;
@@ -187,9 +188,48 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
         }
     }
 
-    pub fn handle_basic_block(&mut self, bbid: BasicBlock, bb: &BasicBlockData<'tcx>) {
-        println!("  {:?}", bbid);
+    /// We are looking for `{core, std}::ptr::{offset, offset_from, wrapping_offset}`
+    fn names_non_reflike_function(&mut self, def_id: DefId) -> bool {
+        // look for read/write unaligned?
+        let def_path = self.cx.tcx.def_path(def_id);
+        let crate_name = self.cx.tcx.crate_name(def_path.krate);
+        if crate_name != Symbol::intern("core") && crate_name != Symbol::intern("std") {
+            return false;
+        }
 
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum WantedSymbol {
+            Ptr,
+            Offset,
+            Matched,
+            NotMatched
+        }
+        let mut state = WantedSymbol::Ptr;
+
+        for item in def_path.data {
+            if let Some(name) = item.data.get_opt_name() {
+                state = match state {
+                    WantedSymbol::Ptr if name == Symbol::intern("ptr") => {
+                        WantedSymbol::Offset
+                    }
+                    WantedSymbol::Offset if
+                        name == Symbol::intern("offset") ||
+                        name == Symbol::intern("offset_from") ||
+                        name == Symbol::intern("wrapping_offset") => {
+                            WantedSymbol::Matched
+                        }
+                    _ => WantedSymbol::NotMatched
+                };
+                if state == WantedSymbol::NotMatched {
+                    break;
+                }
+            }
+        }
+
+        state == WantedSymbol::Matched
+    }
+
+    pub fn handle_basic_block(&mut self, bbid: BasicBlock, bb: &BasicBlockData<'tcx>) {
         for (_idx, s) in bb.statements.iter().enumerate() {
             if let StatementKind::Assign(box(ref lv, ref rv)) = s.kind {
                 let should_mark_lvalue = self.mark_rvalue(rv);
@@ -197,21 +237,34 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
                     self.mark_place(lv);
                 }
             }
-            println!("{:?}", s);
         }
 
         if let TerminatorKind::Call {
             ref func,
             ref args,
-            // ref destination,
             ..
         } = bb.terminator().kind {
-            // check for calls to:
-            // ptr::{offset, offset_from, wrapping_offset, wrapping_offset_from}
             println!("    call {:?} {:?}", func, args);
+            match func {
+                Operand::Copy(place) => println!("func copied {:?}", place),
+                Operand::Move(place) => println!("func moved {:?}", place),
+                Operand::Constant(ref c) => {
+                    match c.literal.ty.kind {
+                        TyKind::FnDef(did, _) => {
+                            let should_mark_arg = self.names_non_reflike_function(did);
+                            println!("func {} {:?}", should_mark_arg, did);
+                            if should_mark_arg {
+                                // TODO: should offset_from mark? if so, it should do both arguments
+                                self.mark_operand(&args[0]);
+                            }
+                        },
+                        _ => {
+                            println!("func constant.kind {:?}", c.literal.ty.kind);
+                            todo!();
+                        }
+                    }
+                }
+            }
         }
-
-        println!("{:?}", bb.terminator());
-
     }
 }
