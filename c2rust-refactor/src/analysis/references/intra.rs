@@ -1,6 +1,7 @@
 use rustc::hir::def_id::DefId;
 use rustc::mir::*;
-use rustc::ty::{Ty, TyKind};
+use rustc::mir::interpret::{ConstValue, Scalar};
+use rustc::ty::{ConstKind, Ty, TyKind, TyS};
 use rustc_index::vec::IndexVec;
 use syntax::source_map::{DUMMY_SP, Spanned};
 
@@ -90,14 +91,13 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
     }
 
     fn mark_place(&mut self, place: &Place<'tcx>) {
+        // confirm place.projection is unimportant
         match place.base {
             PlaceBase::Local(l) => {
-                // factor out to label_local_type?
                 let spanned = self.local_tys[l];
                 let lty = spanned.node;
 
                 if let Some(_) = lty.label {
-                    println!("mark_place b={:?} p={:?} local={:?} ty={:?}", place.base, place.projection, l, lty);
                     let relabeled = self.cx.lcx.relabel(lty, &mut |l| l.map(|_| false));
                     self.local_tys[l] = Spanned {
                         node: relabeled,
@@ -107,7 +107,6 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
             },
             PlaceBase::Static(ref s) => match s.kind {
                 StaticKind::Static => {
-                    println!("mark_place b={:?} p={:?} static={:?}", place.base, place.projection, s);
                     let lty = self.cx.static_ty(s.def_id);
                     let relabeled = self.cx.lcx.relabel(lty, &mut |l| l.map(|_| false));
                     self.cx.statics.insert(s.def_id, relabeled);
@@ -124,17 +123,51 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
         }
     }
 
-    fn mark_lvalue(&mut self, lv: &Place<'tcx>) {
-        // nop
+    fn can_create_reference_from_ty(&mut self, ty: Ty<'tcx>) -> bool {
+        match ty.kind {
+            TyKind::RawPtr(_) | TyKind::Ref(_, _, _) => true,
+            // should other types like slices or fn pointers return true?
+            _ => false,
+        }
+    }
+
+    fn can_create_reference_from_op(&mut self, op: &Operand<'tcx>) -> bool {
+        match *op {
+            Operand::Copy(ref lv) | Operand::Move(ref lv) => {
+                match lv.base {
+                    PlaceBase::Local(l) => {
+                        let ty = self.local_tys[l].node.ty;
+                        self.can_create_reference_from_ty(ty)
+                    }
+                    PlaceBase::Static(ref s) => match s.kind {
+                        StaticKind::Static => {
+                            let ty = self.cx.static_ty(s.def_id).ty;
+                            self.can_create_reference_from_ty(ty)
+                        },
+                        StaticKind::Promoted(_, _) => todo!(),
+                    }
+                }
+            }
+            Operand::Constant(ref c) => {
+                (match c.literal.ty.kind {
+                    TyKind::Int(_) | TyKind::Uint(_) => true,
+                    _ => false,
+                }) && (match c.literal.val {
+                    // e.g. "0 as usize" for creating a null pointer
+                    // check for Scalar::Ptr?
+                    ConstKind::Value(ConstValue::Scalar(Scalar::Raw { data, .. })) => data == 0,
+                    _ => false,
+                })
+            }
+        }
     }
 
     /// Marks non-reflike operands present in `rv`. Returns true if assigning
     /// `rv` to an lvalue would make the lvalue non-reflike.
     fn mark_rvalue(&mut self, rv: &Rvalue<'tcx>) -> bool {
         match *rv {
-            Rvalue::Cast(CastKind::Misc, ref _op, _cast_raw_ty) => {
-                println!("mark? {:?} cast", rv);
-                true // cast_raw_ty is a pointer type, op is not {pointer, ref, 0}
+            Rvalue::Cast(CastKind::Misc, ref op, TyS { kind: TyKind::RawPtr(_), .. }) => {
+                !self.can_create_reference_from_op(op)
             }
             Rvalue::BinaryOp(op, ref a, ref b) | Rvalue::CheckedBinaryOp(op, ref a, ref b) => {
                 match op {
@@ -142,14 +175,10 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
                     | BinOp::Le
                     | BinOp::Ge
                     | BinOp::Gt => {
-                        println!("mark? {:?}, {:?} ineq", a, b);
                         self.mark_operand(a);
                         self.mark_operand(b);
                     }
-                    BinOp::Offset => {
-                        println!("mark? {:?} offset", a);
-                        self.mark_operand(a);
-                    },
+                    BinOp::Offset => self.mark_operand(a),
                     _ => {},
                 }
                 false
@@ -163,12 +192,9 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
 
         for (_idx, s) in bb.statements.iter().enumerate() {
             if let StatementKind::Assign(box(ref lv, ref rv)) = s.kind {
-                // lv = Rvalue(Lt(a, b)) ==> mark a, b, lv unaffected
-                // lv = Rvalue(Offset(a, n)) ==> mark a, lv unaffected
-                // lv = Rvalue(Cast(x, *mut T)) ==> mark lv
                 let should_mark_lvalue = self.mark_rvalue(rv);
                 if should_mark_lvalue {
-                    self.mark_lvalue(lv);
+                    self.mark_place(lv);
                 }
             }
             println!("{:?}", s);
@@ -177,7 +203,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
         if let TerminatorKind::Call {
             ref func,
             ref args,
-            ref destination,
+            // ref destination,
             ..
         } = bb.terminator().kind {
             // check for calls to:
