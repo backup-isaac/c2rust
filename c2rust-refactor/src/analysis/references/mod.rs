@@ -27,11 +27,12 @@ pub type RefdFnSig<'lty, 'tcx> = FnSig<'lty, 'tcx, Option<RefLike>>;
 
 fn analyze_intra<'a, 'tcx, 'lty>(
     cx: &mut Ctxt<'lty, 'tcx>,
+    st: &CommandState,
     hir_map: &HirMap<'a, 'tcx>,
     tcx: TyCtxt<'tcx>,
 ) {
     for &def_id in tcx.mir_keys(LOCAL_CRATE).iter() {
-        if !is_fn(hir_map, def_id) {
+        if !is_fn(hir_map, def_id) || !st.marked(hir_map.as_local_node_id(def_id).expect("non-local def ID"), "target") {
             continue;
         }
 
@@ -47,7 +48,7 @@ fn analyze_intra<'a, 'tcx, 'lty>(
 }
 
 pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
-    _st: &CommandState,
+    st: &CommandState,
     dcx: &RefactorCtxt<'a, 'tcx>,
     arena: &'lty SyncDroplessArena
 ) -> AnalysisResult<'lty, 'tcx> {
@@ -56,7 +57,7 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
 
     // This analysis is entirely local. Unsure if attempting to
     // analyze across functions is even useful here
-    analyze_intra(&mut cx, &dcx.hir_map(), dcx.ty_ctxt());
+    analyze_intra(&mut cx, st, &dcx.hir_map(), dcx.ty_ctxt());
     cx.into()
 }
 
