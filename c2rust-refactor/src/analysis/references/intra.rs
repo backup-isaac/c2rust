@@ -63,7 +63,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
                 Some(true)
             },
             TyKind::FnDef(def_id, _) => {
-                println!("nested? def {:?}", def_id);
+                debug!("nested? def {:?}", def_id);
                 unimplemented!()
             },
             _ => None,
@@ -71,14 +71,12 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
     }
 
     pub fn finish(self) {
-        println!("-- {:?} local_tys --", self.def_id);
+        debug!("-- {:?} local pointers --", self.def_id);
 
         for (local, spanned) in self.local_tys.iter_enumerated() {
-            println!("    {:?}: {:?}", local, spanned);
             let lty = spanned.node;
-            if let Some(reflike) = lty.label {
-                assert!(if let TyKind::RawPtr(_) = lty.ty.kind { true } else { false });
-                println!("    ptr {}reflike", if reflike { "" } else { "non-" });
+            if let Some(_) = lty.label {
+                debug!("    {:?}: {:?}", local, spanned);
             }
         }
 
@@ -189,19 +187,20 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
     }
 
     /// We are looking for `{core, std}::ptr::{offset, offset_from, wrapping_offset}`
-    fn names_non_reflike_function(&mut self, def_id: DefId) -> bool {
+    fn mark_non_reflike_fn_args(&mut self, def_id: DefId, args: &[Operand<'tcx>]) {
         // look for read/write unaligned?
         let def_path = self.cx.tcx.def_path(def_id);
         let crate_name = self.cx.tcx.crate_name(def_path.krate);
         if crate_name != Symbol::intern("core") && crate_name != Symbol::intern("std") {
-            return false;
+            return;
         }
 
         #[derive(Debug, Clone, Copy, PartialEq)]
         enum WantedSymbol {
             Ptr,
             Offset,
-            Matched,
+            MarkFirstArg,
+            MarkTwoArgs,
             NotMatched
         }
         let mut state = WantedSymbol::Ptr;
@@ -214,10 +213,12 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
                     }
                     WantedSymbol::Offset if
                         name == Symbol::intern("offset") ||
-                        name == Symbol::intern("offset_from") ||
                         name == Symbol::intern("wrapping_offset") => {
-                            WantedSymbol::Matched
+                            WantedSymbol::MarkFirstArg
                         }
+                    WantedSymbol::Offset if name == Symbol::intern("offset_from") => {
+                        WantedSymbol::MarkTwoArgs
+                    }
                     _ => WantedSymbol::NotMatched
                 };
                 if state == WantedSymbol::NotMatched {
@@ -226,12 +227,24 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
             }
         }
 
-        state == WantedSymbol::Matched
+        match state {
+            WantedSymbol::MarkFirstArg => {
+                self.mark_operand(&args[0]);
+            }
+            WantedSymbol::MarkTwoArgs => {
+                self.mark_operand(&args[0]);
+                self.mark_operand(&args[1]);
+            }
+            _ => {}
+        }
     }
 
     pub fn handle_basic_block(&mut self, bbid: BasicBlock, bb: &BasicBlockData<'tcx>) {
+        debug!("  {:?}", bbid);
+
         for (_idx, s) in bb.statements.iter().enumerate() {
             if let StatementKind::Assign(box(ref lv, ref rv)) = s.kind {
+                debug!("    {:?}", s);
                 let should_mark_lvalue = self.mark_rvalue(rv);
                 if should_mark_lvalue {
                     self.mark_place(lv);
@@ -239,27 +252,21 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
             }
         }
 
+        // With interprocedural analysis, this hardcoding can be removed
         if let TerminatorKind::Call {
             ref func,
             ref args,
             ..
         } = bb.terminator().kind {
-            println!("    call {:?} {:?}", func, args);
+            debug!("    call {:?} {:?}", func, args);
             match func {
-                Operand::Copy(place) => println!("func copied {:?}", place),
-                Operand::Move(place) => println!("func moved {:?}", place),
+                Operand::Copy(place) => debug!("func copied {:?}", place),
+                Operand::Move(place) => debug!("func moved {:?}", place),
                 Operand::Constant(ref c) => {
                     match c.literal.ty.kind {
-                        TyKind::FnDef(did, _) => {
-                            let should_mark_arg = self.names_non_reflike_function(did);
-                            println!("func {} {:?}", should_mark_arg, did);
-                            if should_mark_arg {
-                                // TODO: should offset_from mark? if so, it should do both arguments
-                                self.mark_operand(&args[0]);
-                            }
-                        },
+                        TyKind::FnDef(did, _) => self.mark_non_reflike_fn_args(did, args),
                         _ => {
-                            println!("func constant.kind {:?}", c.literal.ty.kind);
+                            debug!("func constant.kind {:?}", c.literal.ty.kind);
                             todo!();
                         }
                     }
