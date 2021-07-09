@@ -13,6 +13,7 @@ pub struct IntraCtxt<'c, 'lty, 'tcx: 'lty> {
     cx: &'c mut Ctxt<'lty, 'tcx>,
     def_id: DefId,
     local_tys: IndexVec<Local, Spanned<RefdTy<'lty, 'tcx>>>,
+    no_va_arg_count: usize,
 }
 
 impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
@@ -53,6 +54,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
             cx,
             def_id,
             local_tys,
+            no_va_arg_count: if sig.is_variadic { mir.arg_count - 1 } else { mir.arg_count },
         }
     }
 
@@ -80,13 +82,24 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
             }
         }
 
-        self.cx.func_result(self.def_id).locals = self.local_tys.raw.iter().filter_map(|spanned_ity| {
+        let inputs = self.local_tys.raw[1..=self.no_va_arg_count]
+            .iter()
+            .map(|s| s.node)
+            .collect::<Vec<_>>();
+        let inputs = self.cx.lcx.mk_slice(&inputs);
+
+        let func = self.cx.func_result(self.def_id);
+
+        func.sig.inputs = inputs;
+        func.locals = self.local_tys.raw.iter().filter_map(|spanned_ity| {
             if spanned_ity.span == DUMMY_SP {
                 None
             } else {
                 Some((spanned_ity.span, spanned_ity.node))
             }
         }).collect();
+
+        func.sig.output = self.local_tys.raw[0].node;
     }
 
     fn mark_place(&mut self, place: &Place<'tcx>) {
@@ -113,6 +126,18 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
                 StaticKind::Promoted(_, _) => todo!(),
             }
         }
+    }
+
+    fn is_reflike(&mut self, place: &Place<'tcx>) -> bool {
+        let lty = match place.base {
+            PlaceBase::Local(l) => self.local_tys[l].node,
+            PlaceBase::Static(ref s) => match s.kind {
+                StaticKind::Static => self.cx.static_ty(s.def_id),
+                StaticKind::Promoted(_, _) => todo!(),
+            }
+        };
+
+        lty.label.unwrap_or(true)
     }
 
     fn mark_operand(&mut self, op: &Operand<'tcx>) {
@@ -163,8 +188,14 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
 
     /// Marks non-reflike operands present in `rv`. Returns true if assigning
     /// `rv` to an lvalue would make the lvalue non-reflike.
-    fn mark_rvalue(&mut self, rv: &Rvalue<'tcx>) -> bool {
+    fn mark_rvalue(&mut self, rv: &Rvalue<'tcx>, propagate_backward: RefLike) -> bool {
         match *rv {
+            Rvalue::Use(ref a) if !propagate_backward => {
+                // For x = a where x is non-reflike, a needs to be marked as well.
+                debug!("          ^---- mark({:?}, propagated)", a);
+                self.mark_operand(a);
+                false
+            }
             Rvalue::Cast(CastKind::Misc, ref op, TyS { kind: TyKind::RawPtr(_), .. }) => {
                 !self.can_create_reference_from_op(op)
             }
@@ -174,10 +205,15 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
                     | BinOp::Le
                     | BinOp::Ge
                     | BinOp::Gt => {
+                        debug!("          ^---- mark({:?}, compar)", a);
+                        debug!("          ^---- mark({:?}, compar)", b);
                         self.mark_operand(a);
                         self.mark_operand(b);
                     }
-                    BinOp::Offset => self.mark_operand(a),
+                    BinOp::Offset => {
+                        debug!("          ^---- mark({:?}, offset)", a);
+                        self.mark_operand(a);
+                    },
                     _ => {},
                 }
                 false
@@ -229,9 +265,12 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
 
         match state {
             WantedSymbol::MarkFirstArg => {
+                debug!("          ^---- mark({:?}, call)", &args[0]);
                 self.mark_operand(&args[0]);
             }
             WantedSymbol::MarkTwoArgs => {
+                debug!("          ^---- mark({:?}, call)", &args[0]);
+                debug!("          ^---- mark({:?}, call)", &args[1]);
                 self.mark_operand(&args[0]);
                 self.mark_operand(&args[1]);
             }
@@ -241,16 +280,6 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
 
     pub fn handle_basic_block(&mut self, bbid: BasicBlock, bb: &BasicBlockData<'tcx>) {
         debug!("  {:?}", bbid);
-
-        for (_idx, s) in bb.statements.iter().enumerate() {
-            if let StatementKind::Assign(box(ref lv, ref rv)) = s.kind {
-                debug!("    {:?}", s);
-                let should_mark_lvalue = self.mark_rvalue(rv);
-                if should_mark_lvalue {
-                    self.mark_place(lv);
-                }
-            }
-        }
 
         // With interprocedural analysis, this hardcoding can be removed
         if let TerminatorKind::Call {
@@ -270,6 +299,19 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
                             todo!();
                         }
                     }
+                }
+            }
+        }
+
+        for s in bb.statements.iter().rev() {
+            if let StatementKind::Assign(box(ref lv, ref rv)) = s.kind {
+                debug!("    {:?}", s);
+
+                let propagate = self.is_reflike(lv);
+                let should_mark_lvalue = self.mark_rvalue(rv, propagate);
+                if should_mark_lvalue {
+                    self.mark_place(lv);
+                    debug!("      ^---- mark({:?}, =cast)", lv);
                 }
             }
         }
