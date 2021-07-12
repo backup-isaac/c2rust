@@ -1,11 +1,12 @@
 use rustc::hir::def_id::DefId;
 use rustc::mir::*;
 use rustc::mir::interpret::{ConstValue, Scalar};
-use rustc::ty::{ConstKind, List, Ty, TyKind, TyS};
+use rustc::ty::{ConstKind, List, Ty, TyKind, TypeAndMut, TyS};
 use rustc_index::vec::IndexVec;
 use rustc_target::abi::VariantIdx;
 use syntax::source_map::{DUMMY_SP, Spanned};
-use syntax::symbol::Symbol;
+
+use c2rust_ast_builder::IntoSymbol;
 
 use super::{RefdTy, RefLike};
 use super::context::Ctxt;
@@ -180,19 +181,23 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
         }
     }
 
+    fn get_place_lty(&mut self, place: &Place<'tcx>) -> RefdTy<'lty, 'tcx> {
+        match place.base {
+            PlaceBase::Local(l) => self.local_tys[l].node,
+            PlaceBase::Static(ref s) => match s.kind {
+                StaticKind::Static => self.cx.static_ty(s.def_id),
+                StaticKind::Promoted(_, _) => todo!(),
+            }
+        }
+    }
+
     fn mark_place(&mut self, place: &Place<'tcx>) {
         match place.ty(self.mir, self.cx.tcx).ty.kind {
             TyKind::RawPtr(_) => {},
             _ => return, // not useful to mark anything else
         }
 
-        let base_lty = match place.base {
-            PlaceBase::Local(l) => self.local_tys[l].node,
-            PlaceBase::Static(ref s) => match s.kind {
-                StaticKind::Static => self.cx.static_ty(s.def_id),
-                StaticKind::Promoted(_, _) => todo!(),
-            }
-        };
+        let base_lty = self.get_place_lty(place);
 
         let modified_lty = self.mark_ltys(place.projection, base_lty, None);
         debug!("mark_place {:?} = {:?}", place, modified_lty);
@@ -217,15 +222,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
     }
 
     fn is_reflike(&mut self, place: &Place<'tcx>) -> bool {
-        let lty = match place.base {
-            PlaceBase::Local(l) => self.local_tys[l].node,
-            PlaceBase::Static(ref s) => match s.kind {
-                StaticKind::Static => self.cx.static_ty(s.def_id),
-                StaticKind::Promoted(_, _) => todo!(),
-            }
-        };
-
-        lty.label.unwrap_or(true)
+        self.get_place_lty(place).label.unwrap_or(true)
     }
 
     fn mark_operand(&mut self, op: &Operand<'tcx>) {
@@ -235,30 +232,27 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
         }
     }
 
-    fn can_create_reference_from_ty(&mut self, ty: Ty<'tcx>) -> bool {
+    fn can_create_reference_from_ty(&mut self, ty: Ty<'tcx>, dest_base_type: Ty<'tcx>) -> bool {
         match ty.kind {
-            TyKind::RawPtr(_) | TyKind::Ref(_, _, _) => true,
+            TyKind::RawPtr(TypeAndMut { ty: pointee_ty, .. })
+            | TyKind::Ref(_, pointee_ty, _) => TyS::same_type(pointee_ty, dest_base_type),
             // should other types like slices or fn pointers return true?
             _ => false,
         }
     }
 
-    fn can_create_reference_from_op(&mut self, op: &Operand<'tcx>) -> bool {
+    fn can_create_reference_from_op(&mut self, op: &Operand<'tcx>, dest_base_type: Ty<'tcx>) -> bool {
         match *op {
             Operand::Copy(ref lv) | Operand::Move(ref lv) => {
-                match lv.base {
-                    PlaceBase::Local(l) => {
-                        let ty = self.local_tys[l].node.ty;
-                        self.can_create_reference_from_ty(ty)
-                    }
-                    PlaceBase::Static(ref s) => match s.kind {
-                        StaticKind::Static => {
-                            let ty = self.cx.static_ty(s.def_id).ty;
-                            self.can_create_reference_from_ty(ty)
-                        },
-                        StaticKind::Promoted(_, _) => todo!(),
-                    }
+                let lty = self.get_place_lty(lv).ty;
+                let can_create = self.can_create_reference_from_ty(lty, dest_base_type);
+                if !can_create {
+                    // If e.g. we cast a pointer of type A to type B, neither can become a reference
+                    // This ensures the operand being casted is marked accordingly
+                    debug!("          ^---- mark({:?}, cast)", lv);
+                    self.mark_place(lv);
                 }
+                can_create
             }
             Operand::Constant(ref c) => {
                 (match c.literal.ty.kind {
@@ -284,8 +278,9 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
                 self.mark_operand(a);
                 false
             }
-            Rvalue::Cast(CastKind::Misc, ref op, TyS { kind: TyKind::RawPtr(_), .. }) => {
-                !self.can_create_reference_from_op(op)
+            Rvalue::Cast(CastKind::Misc, ref op, TyS { kind: TyKind::RawPtr(TypeAndMut { ty, .. }), .. }) => {
+                debug!("cast to *{:?}", ty);
+                !self.can_create_reference_from_op(op, ty)
             }
             Rvalue::BinaryOp(op, ref a, ref b) | Rvalue::CheckedBinaryOp(op, ref a, ref b) => {
                 match op {
@@ -315,7 +310,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
         // look for read/write unaligned?
         let def_path = self.cx.tcx.def_path(def_id);
         let crate_name = self.cx.tcx.crate_name(def_path.krate);
-        if crate_name != Symbol::intern("core") && crate_name != Symbol::intern("std") {
+        if crate_name != "core".into_symbol() && crate_name != "std".into_symbol() {
             return;
         }
 
@@ -332,17 +327,19 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
         for item in def_path.data {
             if let Some(name) = item.data.get_opt_name() {
                 state = match state {
-                    WantedSymbol::Ptr if name == Symbol::intern("ptr") => {
+                    WantedSymbol::Ptr if name == "ptr".into_symbol() => {
                         WantedSymbol::Offset
                     }
                     WantedSymbol::Offset if
-                        name == Symbol::intern("offset") ||
-                        name == Symbol::intern("wrapping_offset") => {
+                        name == "offset".into_symbol() ||
+                        name == "wrapping_offset".into_symbol() => {
                             WantedSymbol::MarkFirstArg
                         }
-                    WantedSymbol::Offset if name == Symbol::intern("offset_from") => {
-                        WantedSymbol::MarkTwoArgs
-                    }
+                    WantedSymbol::Offset if
+                        name == "offset_from".into_symbol() ||
+                        name == "wrapping_offset_from".into_symbol() => {
+                            WantedSymbol::MarkTwoArgs
+                        }
                     _ => WantedSymbol::NotMatched
                 };
                 if state == WantedSymbol::NotMatched {
