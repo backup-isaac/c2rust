@@ -10,19 +10,20 @@ use syntax::symbol::Symbol;
 use super::{RefdTy, RefLike};
 use super::context::Ctxt;
 
-pub struct IntraCtxt<'c, 'lty, 'tcx: 'lty> {
+pub struct IntraCtxt<'c, 'lty, 'a: 'lty, 'tcx: 'a> {
     cx: &'c mut Ctxt<'lty, 'tcx>,
     def_id: DefId,
     local_tys: IndexVec<Local, Spanned<RefdTy<'lty, 'tcx>>>,
+    mir: &'a Body<'tcx>,
     no_va_arg_count: usize,
 }
 
-impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
+impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
     pub fn new(
         cx: &'c mut Ctxt<'lty, 'tcx>,
         def_id: DefId,
         mir: &'a Body<'tcx>,
-    ) -> IntraCtxt<'c, 'lty, 'tcx> {
+    ) -> IntraCtxt<'c, 'lty, 'a, 'tcx> {
         let sig = cx.func_result(def_id).sig;
 
         let mut local_tys = IndexVec::new();
@@ -55,6 +56,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
             cx,
             def_id,
             local_tys,
+            mir,
             no_va_arg_count: if sig.is_variadic { mir.arg_count - 1 } else { mir.arg_count },
         }
     }
@@ -179,6 +181,11 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
     }
 
     fn mark_place(&mut self, place: &Place<'tcx>) {
+        match place.ty(self.mir, self.cx.tcx).ty.kind {
+            TyKind::RawPtr(_) => {},
+            _ => return, // not useful to mark anything else
+        }
+
         let base_lty = match place.base {
             PlaceBase::Local(l) => self.local_tys[l].node,
             PlaceBase::Static(ref s) => match s.kind {
