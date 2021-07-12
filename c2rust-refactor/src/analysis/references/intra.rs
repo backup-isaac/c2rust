@@ -1,8 +1,9 @@
 use rustc::hir::def_id::DefId;
 use rustc::mir::*;
 use rustc::mir::interpret::{ConstValue, Scalar};
-use rustc::ty::{ConstKind, Ty, TyKind, TyS};
+use rustc::ty::{ConstKind, List, Ty, TyKind, TyS};
 use rustc_index::vec::IndexVec;
+use rustc_target::abi::VariantIdx;
 use syntax::source_map::{DUMMY_SP, Spanned};
 use syntax::symbol::Symbol;
 
@@ -102,28 +103,108 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
         func.sig.output = self.local_tys.raw[0].node;
     }
 
-    fn mark_place(&mut self, place: &Place<'tcx>) {
-        // confirm place.projection is unimportant
-        match place.base {
-            PlaceBase::Local(l) => {
-                let spanned = self.local_tys[l];
-                let lty = spanned.node;
+    fn recurse_on_arg(
+        &mut self,
+        remaining_projection: &'tcx List<PlaceElem<'tcx>>,
+        lty: RefdTy<'lty, 'tcx>,
+        arg_index: usize
+    ) -> RefdTy<'lty, 'tcx> {
+        debug!("    recurse {}", arg_index);
+        let marked_arg = self.mark_ltys(remaining_projection, lty.args[arg_index], None);
+        debug!("    recursive result: {:?}", marked_arg);
+        if marked_arg == lty.args[arg_index] {
+            debug!("    ret");
+            lty
+        } else {
+            debug!("    sub arg");
+            let mut new_args = lty.args[..arg_index].to_vec();
+            new_args.push(marked_arg);
+            new_args.extend_from_slice(&lty.args[(arg_index + 1)..]);
+            let new_args = self.cx.lcx.mk_slice(&new_args);
+            self.cx.lcx.mk(lty.ty, new_args, lty.label)
+        }
+    }
 
-                if let Some(_) = lty.label {
-                    let relabeled = self.cx.lcx.relabel(lty, &mut |l| l.map(|_| false));
-                    self.local_tys[l] = Spanned {
-                        node: relabeled,
-                        span: spanned.span,
-                    };
-                }
-            },
-            PlaceBase::Static(ref s) => match s.kind {
-                StaticKind::Static => {
-                    let lty = self.cx.static_ty(s.def_id);
-                    let relabeled = self.cx.lcx.relabel(lty, &mut |l| l.map(|_| false));
-                    self.cx.statics.insert(s.def_id, relabeled);
+    /// Recursively projects through `lty`'s type tree to mark the innermost type as
+    /// "non-reflike"; for instance, a projection accessing a struct field should cause the
+    /// field to be marked as opposed to a pointer to the struct.
+    /// Returns a new, modified lty
+    fn mark_ltys(
+        &mut self,
+        projection: &'tcx List<PlaceElem<'tcx>>,
+        lty: RefdTy<'lty, 'tcx>,
+        variant: Option<VariantIdx>,
+    ) -> RefdTy<'lty, 'tcx> {
+        debug!("  mark_ltys {:?} {:?} {:?}", projection, lty, variant);
+        let projection = projection.to_vec();
+        if let Some(elem) = projection.first() {
+            let remaining_projection = self.cx.tcx.intern_place_elems(&projection[1..]);
+
+            debug!("    elem {:?} remaining {:?}", elem, remaining_projection);
+            match elem {
+                ProjectionElem::Deref | ProjectionElem::Index(_) => self.recurse_on_arg(remaining_projection, lty, 0),
+                ProjectionElem::Field(f, _) => {
+                    match lty.ty.kind {
+                        TyKind::Adt(adt, _) => {
+                            let field_def = &adt
+                                .variants[variant.unwrap_or(VariantIdx::from_usize(0))]
+                                .fields[f.index()];
+                            let field_lty = self.cx.static_ty(field_def.did);
+                            debug!("    field: {:?}", field_lty);
+                            let marked_field = self.mark_ltys(remaining_projection, self.cx.lcx.subst(field_lty, &lty.args), None);
+                            debug!("    field result: {:?}", marked_field);
+
+                            // Mark the field, not a pointer to the containing type
+                            if marked_field != field_lty {
+                                self.cx.statics.insert(field_def.did, marked_field);
+                            }
+                            lty
+                        }
+                        TyKind::Tuple(_) => self.recurse_on_arg(remaining_projection, lty, f.index()),
+                        _ => unimplemented!(),
+                    }
                 },
+                ProjectionElem::Downcast(_, variant) => self.mark_ltys(remaining_projection, lty, Some(*variant)),
+                ProjectionElem::ConstantIndex { .. } | ProjectionElem::Subslice { .. } => unimplemented!(),
+            }
+        } else {
+            if let Some(true) = lty.label {
+                debug!("    projection empty, relabel false");
+                self.cx.lcx.mk(lty.ty, lty.args, Some(false))
+            } else {
+                debug!("    projection empty, ret");
+                lty
+            }
+        }
+    }
+
+    fn mark_place(&mut self, place: &Place<'tcx>) {
+        let base_lty = match place.base {
+            PlaceBase::Local(l) => self.local_tys[l].node,
+            PlaceBase::Static(ref s) => match s.kind {
+                StaticKind::Static => self.cx.static_ty(s.def_id),
                 StaticKind::Promoted(_, _) => todo!(),
+            }
+        };
+
+        let modified_lty = self.mark_ltys(place.projection, base_lty, None);
+        debug!("mark_place {:?} = {:?}", place, modified_lty);
+
+        if modified_lty != base_lty {
+            debug!("assign modified");
+
+            match place.base {
+                PlaceBase::Local(l) => {
+                    let span = self.local_tys[l].span;
+                    self.local_tys[l] = Spanned {
+                        node: modified_lty,
+                        span
+                    };
+                },
+                PlaceBase::Static(ref s) => match s.kind {
+                    StaticKind::Static => { self.cx.statics.insert(s.def_id, modified_lty); },
+                    StaticKind::Promoted(_, _) => todo!(),
+                },
             }
         }
     }
@@ -143,7 +224,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'tcx> {
     fn mark_operand(&mut self, op: &Operand<'tcx>) {
         match *op {
             Operand::Copy(ref lv) | Operand::Move(ref lv) => self.mark_place(lv),
-            Operand::Constant(_) => unimplemented!(),
+            Operand::Constant(_) => {},
         }
     }
 
