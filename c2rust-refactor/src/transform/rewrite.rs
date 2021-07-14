@@ -11,37 +11,37 @@ use crate::RefactorCtxt;
 
 
 /// # `rewrite_expr` Command
-/// 
+///
 /// Usage: `rewrite_expr PAT REPL [FILTER]`
-/// 
+///
 /// Marks: reads `FILTER`, if set; may read other marks depending on `PAT`
-/// 
+///
 /// For every expression in the crate matching `PAT`, replace it with `REPL`.
 /// `PAT` and `REPL` are both Rust expressions.  `PAT` can use placeholders to
 /// capture nodes from the matched AST, and `REPL` can refer to those same
 /// placeholders to substitute in the captured nodes.  See the `matcher` module for
 /// details on AST pattern matching.
-/// 
+///
 /// If `FILTER` is provided, only expressions marked `FILTER` will be rewritten.
 /// This usage is obsolete - change `PAT` to `marked!(PAT, FILTER)` to get the same
 /// behavior.
-/// 
+///
 /// Example:
-/// 
+///
 /// ```ignore
 ///     fn double(x: i32) -> i32 {
 ///         x * 2
 ///     }
 /// ```
-/// 
+///
 /// After running `rewrite_expr '$e * 2' '$e + $e'`:
-/// 
+///
 /// ```ignore
 ///     fn double(x: i32) -> i32 {
 ///         x + x
 ///     }
 /// ```
-/// 
+///
 /// Here `$e * 2` matches `x * 2`, capturing `x` as `$e`.  Then `x` is
 /// substituted for `$e` in `$e + $e`, producing the final expression `x + x`.
 pub struct RewriteExpr {
@@ -73,21 +73,21 @@ impl Transform for RewriteExpr {
 
 
 /// # `rewrite_ty` Command
-/// 
+///
 /// Usage: `rewrite_ty PAT REPL [FILTER]`
-/// 
+///
 /// Marks: reads `FILTER`, if set; may read other marks depending on `PAT`
-/// 
+///
 /// For every type in the crate matching `PAT`, replace it with `REPL`.  `PAT` and
 /// `REPL` are both Rust types.  `PAT` can use placeholders to capture nodes from
 /// the matched AST, and `REPL` can refer to those same placeholders to substitute
 /// in the captured nodes.  See the `matcher` module for details on AST pattern
 /// matching.
-/// 
+///
 /// If `FILTER` is provided, only expressions marked `FILTER` will be rewritten.
 /// This usage is obsolete - change `PAT` to `marked!(PAT, FILTER)` to get the same
 /// behavior.
-/// 
+///
 /// See the documentation for `rewrite_expr` for an example of this style of
 /// rewriting.
 pub struct RewriteTy {
@@ -103,7 +103,7 @@ impl Transform for RewriteTy {
         let repl = mcx.parse_ty(&self.repl);
         mut_visit_match_with(mcx, pat, krate, |ast, mcx| {
             if let Some(filter) = self.filter {
-                if !contains_mark(&**ast, filter, st) {
+                if !st.marked(ast.id, filter.into_symbol()) {
                     return;
                 }
             }
