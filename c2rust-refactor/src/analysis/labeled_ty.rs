@@ -237,6 +237,20 @@ impl<'lty, 'tcx: 'lty, L: Clone> LabeledTyCtxt<'lty, L> {
             .collect::<Vec<_>>();
         self.mk_slice(&ltys)
     }
+
+    /// Replace an argument of a type.
+    pub fn replace_arg(
+        &self,
+        lty: LabeledTy<'lty, 'tcx, L>,
+        index: usize,
+        replacement: LabeledTy<'lty, 'tcx, L>,
+    ) -> LabeledTy<'lty, 'tcx, L> {
+        let mut new_args = lty.args[..index].to_vec();
+        new_args.push(replacement);
+        new_args.extend_from_slice(&lty.args[(index + 1)..]);
+        let new_args = self.mk_slice(&new_args);
+        self.mk(lty.ty, new_args, lty.label.clone())
+    }
 }
 
 impl<'lty, 'tcx, L: fmt::Debug> type_map::Type for LabeledTy<'lty, 'tcx, L> {
