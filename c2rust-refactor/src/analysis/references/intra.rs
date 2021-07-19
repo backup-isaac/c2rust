@@ -112,19 +112,11 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
         lty: RefdTy<'lty, 'tcx>,
         arg_index: usize
     ) -> RefdTy<'lty, 'tcx> {
-        debug!("    recurse {}", arg_index);
         let marked_arg = self.mark_ltys(remaining_projection, lty.args[arg_index], None);
-        debug!("    recursive result: {:?}", marked_arg);
         if marked_arg == lty.args[arg_index] {
-            debug!("    ret");
             lty
         } else {
-            debug!("    sub arg");
-            let mut new_args = lty.args[..arg_index].to_vec();
-            new_args.push(marked_arg);
-            new_args.extend_from_slice(&lty.args[(arg_index + 1)..]);
-            let new_args = self.cx.lcx.mk_slice(&new_args);
-            self.cx.lcx.mk(lty.ty, new_args, lty.label)
+            self.cx.lcx.replace_arg(lty, arg_index, marked_arg)
         }
     }
 
@@ -138,56 +130,178 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
         lty: RefdTy<'lty, 'tcx>,
         variant: Option<VariantIdx>,
     ) -> RefdTy<'lty, 'tcx> {
-        debug!("  mark_ltys {:?} {:?} {:?}", projection, lty, variant);
-        let projection = projection.to_vec();
+        let projection = projection.as_ref();
         if let Some(elem) = projection.first() {
             let remaining_projection = self.cx.tcx.intern_place_elems(&projection[1..]);
 
-            debug!("    elem {:?} remaining {:?}", elem, remaining_projection);
             match elem {
-                ProjectionElem::Deref | ProjectionElem::Index(_) => self.recurse_on_arg(remaining_projection, lty, 0),
-                ProjectionElem::Field(f, _) => {
-                    match lty.ty.kind {
-                        TyKind::Adt(adt, _) => {
-                            let field_def = &adt
-                                .variants[variant.unwrap_or(VariantIdx::from_usize(0))]
-                                .fields[f.index()];
-                            let field_lty = self.cx.static_ty(field_def.did);
-                            debug!("    field: {:?}", field_lty);
-                            let marked_field = self.mark_ltys(remaining_projection, self.cx.lcx.subst(field_lty, &lty.args), None);
-                            debug!("    field result: {:?}", marked_field);
+                ProjectionElem::Deref
+                | ProjectionElem::Index(_)
+                | ProjectionElem::ConstantIndex { .. } => self.recurse_on_arg(remaining_projection, lty, 0),
+                ProjectionElem::Field(f, _) => match lty.ty.kind {
+                    TyKind::Adt(adt, _) => {
+                        let field_def = &adt
+                            .variants[variant.unwrap_or(VariantIdx::from_usize(0))]
+                            .fields[f.index()];
+                        let field_lty = self.cx.static_ty(field_def.did);
+                        let marked_field = self.mark_ltys(remaining_projection, self.cx.lcx.subst(field_lty, &lty.args), None);
 
-                            // Mark the field, not a pointer to the containing type
-                            if marked_field != field_lty {
-                                self.cx.statics.insert(field_def.did, marked_field);
-                            }
-                            lty
+                        // Mark the field, not a pointer to the containing type
+                        if marked_field != field_lty {
+                            debug!("static {:?} :: {:?} ==> {:?}", field_def.did, self.cx.statics.get(&field_def.did), marked_field);
+                            self.cx.statics.insert(field_def.did, marked_field);
                         }
-                        TyKind::Tuple(_) => self.recurse_on_arg(remaining_projection, lty, f.index()),
-                        _ => unimplemented!(),
+                        lty
                     }
+                    TyKind::Tuple(_) => self.recurse_on_arg(remaining_projection, lty, f.index()),
+                    _ => unimplemented!(),
                 },
                 ProjectionElem::Downcast(_, variant) => self.mark_ltys(remaining_projection, lty, Some(*variant)),
-                ProjectionElem::ConstantIndex { .. } | ProjectionElem::Subslice { .. } => unimplemented!(),
+                ProjectionElem::Subslice { .. } => unimplemented!(),
             }
         } else {
             if let Some(true) = lty.label {
-                debug!("    projection empty, relabel false");
                 self.cx.lcx.mk(lty.ty, lty.args, Some(false))
             } else {
-                debug!("    projection empty, ret");
                 lty
             }
         }
     }
 
-    fn get_place_lty(&mut self, place: &Place<'tcx>) -> RefdTy<'lty, 'tcx> {
-        match place.base {
+    fn project_lty(
+        &mut self,
+        lty: RefdTy<'lty, 'tcx>,
+        projection: &'tcx List<PlaceElem<'tcx>>,
+        variant: Option<VariantIdx>,
+    ) -> RefdTy<'lty, 'tcx> {
+        let projection = projection.as_ref();
+        if let Some(elem) = projection.first() {
+            let remaining_projection = self.cx.tcx.intern_place_elems(&projection[1..]);
+
+            match elem {
+                ProjectionElem::Deref
+                | ProjectionElem::Index(_)
+                | ProjectionElem::ConstantIndex { .. } => self.project_lty(lty.args[0], remaining_projection, None),
+                ProjectionElem::Field(f, _) => match lty.ty.kind {
+                    TyKind::Adt(adt, _) => {
+                        let field_def = &adt
+                            .variants[variant.unwrap_or(VariantIdx::from_usize(0))]
+                            .fields[f.index()];
+                        let field_lty = self.cx.static_ty(field_def.did);
+                        self.project_lty(self.cx.lcx.subst(field_lty, &lty.args), remaining_projection, None)
+                    }
+                    TyKind::Tuple(_) => self.project_lty(lty.args[f.index()], remaining_projection, None),
+                    _ => lty,
+                }
+                ProjectionElem::Downcast(_, variant) => self.project_lty(lty, remaining_projection, Some(*variant)),
+                ProjectionElem::Subslice { .. } => unimplemented!(),
+            }
+        } else {
+            lty
+        }
+    }
+
+    fn get_projected_place_lty(&mut self, place: &Place<'tcx>) -> RefdTy<'lty, 'tcx> {
+        let lty = self.get_place_lty(&place.base);
+        self.project_lty(lty, place.projection, None)
+    }
+
+    fn get_place_lty(&mut self, pb: &PlaceBase) -> RefdTy<'lty, 'tcx> {
+        match *pb {
             PlaceBase::Local(l) => self.local_tys[l].node,
             PlaceBase::Static(ref s) => match s.kind {
                 StaticKind::Static => self.cx.static_ty(s.def_id),
                 StaticKind::Promoted(_, _) => todo!(),
             }
+        }
+    }
+
+    fn try_set_through_projection(
+        &mut self,
+        to_project: RefdTy<'lty, 'tcx>,
+        projection: &'tcx List<PlaceElem<'tcx>>,
+        lty: RefdTy<'lty, 'tcx>,
+        variant: Option<VariantIdx>
+    ) -> Option<RefdTy<'lty, 'tcx>> {
+        let projection = projection.as_ref();
+        if let Some(elem) = projection.first() {
+            let remaining_projection = self.cx.tcx.intern_place_elems(&projection[1..]);
+
+            match elem {
+                ProjectionElem::Deref
+                | ProjectionElem::Index(_)
+                | ProjectionElem::ConstantIndex { .. } => {
+                    let ret = self.try_set_through_projection(to_project.args[0], remaining_projection, lty, None);
+
+                    ret.map(|returned_lty| {
+                        if to_project.args[0].ty == lty.ty {
+                            self.cx.lcx.replace_arg(to_project, 0, returned_lty)
+                        } else {
+                            returned_lty
+                        }
+                    })
+                },
+                ProjectionElem::Field(f, _) => match to_project.ty.kind {
+                    TyKind::Adt(adt, _) => {
+                        let field_def = &adt
+                            .variants[variant.unwrap_or(VariantIdx::from_usize(0))]
+                            .fields[f.index()];
+                        let field_lty = self.cx.static_ty(field_def.did);
+                        let ret = self.try_set_through_projection(field_lty, remaining_projection, lty, None);
+                        if let Some(returned_lty) = ret {
+                            debug!("static {:?} :: {:?} ==> {:?}", field_def.did, self.cx.statics.get(&field_def.did), returned_lty);
+                            assert_eq!(self.cx.statics.get(&field_def.did).unwrap().ty, returned_lty.ty);
+                            self.cx.statics.insert(field_def.did, returned_lty);
+                        }
+                        None
+                    }
+                    TyKind::Tuple(_) => {
+                        let ret = self.try_set_through_projection(to_project.args[f.index()], remaining_projection, lty, None);
+
+                        ret.map(|returned_lty| {
+                            if to_project.args[f.index()].ty == lty.ty {
+                                self.cx.lcx.replace_arg(to_project, f.index(), returned_lty)
+                            } else {
+                                returned_lty
+                            }
+                        })
+                    }
+                    _ => unimplemented!(),
+                }
+                ProjectionElem::Downcast(_, variant) => self.try_set_through_projection(to_project, remaining_projection, lty, Some(*variant)),
+                ProjectionElem::Subslice { .. } => unimplemented!(),
+            }
+        } else {
+            Some(lty)
+        }
+    }
+
+    fn set_projected_place_lty(&mut self, place: &Place<'tcx>, lty: RefdTy<'lty, 'tcx>) {
+        let to_project = self.get_place_lty(&place.base);
+        let ret = self.try_set_through_projection(to_project, place.projection, lty, None);
+        if let Some(returned_lty) = ret {
+            self.set_place_lty(&place.base, returned_lty);
+        }
+    }
+
+    fn set_place_lty(&mut self, pb: &PlaceBase, lty: RefdTy<'lty, 'tcx>) {
+        match *pb {
+            PlaceBase::Local(l) => {
+                let span = self.local_tys[l].span;
+                debug!("local {:?} :: {:?} ==> {:?}", l, self.local_tys[l].node, lty);
+                assert_eq!(self.local_tys[l].node.ty, lty.ty);
+                self.local_tys[l] = Spanned {
+                    node: lty,
+                    span
+                };
+            },
+            PlaceBase::Static(ref s) => match s.kind {
+                StaticKind::Static => {
+                    debug!("static {:?} :: {:?} ==> {:?}", s.def_id, self.cx.statics.get(&s.def_id), lty);
+                    self.cx.statics.insert(s.def_id, lty);
+                },
+                StaticKind::Promoted(_, _) => todo!(),
+            },
         }
     }
 
@@ -197,32 +311,25 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
             _ => return, // not useful to mark anything else
         }
 
-        let base_lty = self.get_place_lty(place);
-
+        let base_lty = self.get_place_lty(&place.base);
         let modified_lty = self.mark_ltys(place.projection, base_lty, None);
-        debug!("mark_place {:?} = {:?}", place, modified_lty);
 
         if modified_lty != base_lty {
-            debug!("assign modified");
-
-            match place.base {
-                PlaceBase::Local(l) => {
-                    let span = self.local_tys[l].span;
-                    self.local_tys[l] = Spanned {
-                        node: modified_lty,
-                        span
-                    };
-                },
-                PlaceBase::Static(ref s) => match s.kind {
-                    StaticKind::Static => { self.cx.statics.insert(s.def_id, modified_lty); },
-                    StaticKind::Promoted(_, _) => todo!(),
-                },
-            }
+            self.set_place_lty(&place.base, modified_lty);
         }
     }
 
-    fn is_reflike(&mut self, place: &Place<'tcx>) -> bool {
-        self.get_place_lty(place).label.unwrap_or(true)
+    fn contains_non_reflike(&self, lty: RefdTy<'lty, 'tcx>) -> bool {
+        if let Some(false) = lty.label {
+            true
+        } else {
+            for arg in lty.args {
+                if self.contains_non_reflike(arg) {
+                    return true;
+                }
+            }
+            false
+        }
     }
 
     fn mark_operand(&mut self, op: &Operand<'tcx>) {
@@ -244,7 +351,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
     fn can_create_reference_from_op(&mut self, op: &Operand<'tcx>, dest_base_type: Ty<'tcx>) -> bool {
         match *op {
             Operand::Copy(ref lv) | Operand::Move(ref lv) => {
-                let lty = self.get_place_lty(lv).ty;
+                let lty = self.get_projected_place_lty(lv).ty;
                 let can_create = self.can_create_reference_from_ty(lty, dest_base_type);
                 if !can_create {
                     // If e.g. we cast a pointer of type A to type B, neither can become a reference
@@ -270,12 +377,23 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
 
     /// Marks non-reflike operands present in `rv`. Returns true if assigning
     /// `rv` to an lvalue would make the lvalue non-reflike.
-    fn mark_rvalue(&mut self, rv: &Rvalue<'tcx>, propagate_backward: RefLike) -> bool {
+    fn mark_rvalue(&mut self, rv: &Rvalue<'tcx>, propagate_backward: RefdTy<'lty, 'tcx>) -> bool {
         match *rv {
-            Rvalue::Use(ref a) if !propagate_backward => {
+            Rvalue::Use(ref a) if self.contains_non_reflike(propagate_backward) => {
                 // For x = a where x is non-reflike, a needs to be marked as well.
                 debug!("          ^---- mark({:?}, propagated)", a);
-                self.mark_operand(a);
+                match *a {
+                    Operand::Copy(ref place)
+                    | Operand::Move(ref place) => {
+                        assert_eq!(propagate_backward.ty, a.ty(self.mir, self.cx.tcx));
+                        self.set_projected_place_lty(place, propagate_backward);
+                    },
+                    Operand::Constant(_) => {}
+                }
+                false
+            }
+            Rvalue::Ref(_, ref kind, ref place) => {
+                debug!("&{:?} of {:?}: {:?}", kind, place, place.ty(self.mir, self.cx.tcx).ty);
                 false
             }
             Rvalue::Cast(CastKind::Misc, ref op, TyS { kind: TyKind::RawPtr(TypeAndMut { ty, .. }), .. }) => {
@@ -370,9 +488,10 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
         if let TerminatorKind::Call {
             ref func,
             ref args,
+            ref destination,
             ..
         } = bb.terminator().kind {
-            debug!("    call {:?} {:?}", func, args);
+            debug!("    call {:?}({:?}) -> {:?}", func, args, destination);
             match func {
                 Operand::Copy(place) => debug!("func copied {:?}", place),
                 Operand::Move(place) => debug!("func moved {:?}", place),
@@ -392,8 +511,8 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> IntraCtxt<'c, 'lty, 'a, 'tcx> {
             if let StatementKind::Assign(box(ref lv, ref rv)) = s.kind {
                 debug!("    {:?}", s);
 
-                let propagate = self.is_reflike(lv);
-                let should_mark_lvalue = self.mark_rvalue(rv, propagate);
+                let lvalue_lty = self.get_projected_place_lty(lv);
+                let should_mark_lvalue = self.mark_rvalue(rv, lvalue_lty);
                 if should_mark_lvalue {
                     self.mark_place(lv);
                     debug!("      ^---- mark({:?}, =cast)", lv);
