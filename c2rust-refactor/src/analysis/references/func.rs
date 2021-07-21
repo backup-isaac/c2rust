@@ -102,19 +102,37 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         self.add_place_constraints_recursive(from.clone(), to.clone(), to_ty);
     }
 
+    fn add_place_taint(&mut self, place: &Place<'tcx>, reason: Taint<'tcx>) {
+        match place.ty(self.mir, self.cx.tcx).ty.kind {
+            TyKind::RawPtr(_) => {
+                self.cx.constraints.add_taint(
+                    QualifiedPlace::new(place.clone(), Some(self.def_id)),
+                    reason
+                );
+            }
+            TyKind::Ref(_, _, _) => unimplemented!(),
+            _ => {},
+        }
+    }
+
+    fn add_operand_taint(&mut self, op: &Operand<'tcx>, reason: Taint<'tcx>) {
+        match op {
+            Operand::Copy(place)
+            | Operand::Move(place) => self.add_place_taint(place, reason),
+            Operand::Constant(_) => {},
+        }
+    }
+
     fn names_c_void(&self, ty: Ty<'tcx>) -> bool {
         if let TyKind::Adt(adt, _) = ty.kind {
             let def_path = self.cx.tcx.def_path(adt.did);
-            if let Some(name) = def_path.data.last().expect("empty def path").data.get_opt_name() {
-                if name == "c_void".into_symbol() {
-                    debug!(
-                        "c_void crate {:?} def_path {:?}",
-                        self.cx.tcx.crate_name(def_path.krate),
-                        self.cx.tcx.def_path_str(adt.did),
-                    );
-                    return true;
-                }
+
+            if self.cx.tcx.crate_name(def_path.krate) != "core".into_symbol() {
+                return false;
             }
+
+            return def_path.data.iter().map(|it| it.data.get_opt_name()).collect::<Vec<_>>()
+                == ["ffi", "c_void"].iter().map(|s| Some(s.into_symbol())).collect::<Vec<_>>();
         }
         false
     }
@@ -133,28 +151,18 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                     | Operand::Move(place) => match place.ty(self.mir, self.cx.tcx).ty.kind {
                         TyKind::RawPtr(TypeAndMut { ty: pointee_ty, .. })
                         | TyKind::Ref(_, pointee_ty, _) => {
-                            // TODO: check for void *
                             if TyS::same_type(pointee_ty, dest_base_ty)
                             || self.names_c_void(pointee_ty)
                             || self.names_c_void(dest_base_ty) {
                                 self.add_place_constraints(lv, place);
                             } else {
-                                self.cx.constraints.add_taint(
-                                    QualifiedPlace::new(place.clone(), Some(self.def_id)),
-                                    Taint::UsedInPtrCast
-                                );
+                                self.add_place_taint(place, Taint::UsedInPtrCast);
                             }
                         }
-                        _ => self.cx.constraints.add_taint(
-                            QualifiedPlace::new(place.clone(), Some(self.def_id)),
-                            Taint::UsedInPtrCast
-                        ),
+                        _ => self.add_place_taint(lv, Taint::UsedInPtrCast),
                     },
                     Operand::Constant(c) => if !self.is_constant_zero(c) {
-                        self.cx.constraints.add_taint(
-                            QualifiedPlace::new(lv.clone(), Some(self.def_id)),
-                            Taint::UsedInPtrCast
-                        );
+                        self.add_place_taint(lv, Taint::UsedInPtrCast);
                     }
                 }
             },
@@ -199,9 +207,12 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                     | BinOp::Gt => {
                         debug!("        taint(<) {:?}", a);
                         debug!("        taint(<) {:?}", b);
+                        self.add_operand_taint(a, Taint::UsedInArithmetic);
+                        self.add_operand_taint(b, Taint::UsedInArithmetic);
                     },
                     BinOp::Offset => {
                         debug!("        taint(o) {:?}", a);
+                        self.add_operand_taint(a, Taint::UsedInArithmetic);
                     },
                     _ => {},
                 }
