@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use arena::SyncDroplessArena;
@@ -12,11 +11,12 @@ use crate::command::CommandState;
 use crate::context::HirMap;
 use crate::RefactorCtxt;
 
+mod constraint;
 mod context;
-mod intra;
+mod func;
 
 use self::context::Ctxt;
-use self::intra::IntraCtxt;
+use self::func::FuncCtxt;
 
 pub type RefLike = bool;
 
@@ -36,14 +36,21 @@ fn analyze_intra<'a, 'tcx, 'lty>(
             continue;
         }
 
+        // Analyze within marked functions and their deps
+        // function(function definiton) {
+        //     produce constraints involving local variables
+        //     produce constraints involving function calls and globals
+        //     call graph dependencies
+        // }
+
         let mir = tcx.optimized_mir(def_id);
-        let mut local_cx = IntraCtxt::new(cx, def_id, mir);
+        let mut func_cx = FuncCtxt::new(cx, def_id, mir);
 
         for (bbid, bb) in mir.basic_blocks().iter_enumerated() {
-            local_cx.handle_basic_block(bbid, bb);
+            func_cx.analyze_basic_block(bbid, bb);
         }
 
-        local_cx.finish();
+        // local_cx.finish();
     }
 }
 
@@ -55,9 +62,8 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
     let mut cx = Ctxt::new(dcx.ty_ctxt(), arena);
     // TODO: handle provided annotations and marks
 
-    // This analysis is entirely local. Unsure if attempting to
-    // analyze across functions is even useful here
     analyze_intra(&mut cx, st, &dcx.hir_map(), dcx.ty_ctxt());
+    cx.constraints.debug_constraints();
     cx.into()
 }
 
