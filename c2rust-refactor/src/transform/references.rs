@@ -55,13 +55,6 @@ fn do_mark_pointers(st: &CommandState, cx: &RefactorCtxt) {
             let fn_def_id = self.hir_map.get_parent_did(hir_id);
             let f = self.ana.functions.get(&fn_def_id)?;
             f.locals.get(&p.span).map(|f| *f)
-
-            // let mut map_fn = |opt_var: &Option<Var>| -> Option<_> {
-            //     opt_var.map(|var| f.local_assign.get(var).copied()).flatten()
-            // };
-
-            // let lcx = LabeledTyCtxt::new(self.ana.arena());
-            // Some(lcx.relabel(local_var, &mut map_fn))
         }
     }
 
