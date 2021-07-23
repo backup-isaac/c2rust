@@ -32,43 +32,52 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
     fn add_place_constraints_recursive(
         &mut self,
         from: Place<'tcx>,
+        from_def_id: DefId,
         to: Place<'tcx>,
+        to_def_id: DefId,
         ty: Ty<'tcx>,
     ) {
-        debug!("type {:?}", ty);
         match ty.kind {
             TyKind::Array(inner_ty, _)
             | TyKind::Slice(inner_ty) => self.add_place_constraints_recursive(
                 // This local variable is bogus. This is ok since constraints
                 // do not care about what is used to do the indexing
                 self.cx.tcx.mk_place_index(from, Local::from_usize(0)),
+                from_def_id,
                 self.cx.tcx.mk_place_index(to, Local::from_usize(0)),
+                to_def_id,
                 inner_ty
             ),
             TyKind::RawPtr(TypeAndMut { ty, .. }) => {
                 let c = Constraint {
-                    from: QualifiedPlace::new(from.clone(), Some(self.def_id)),
-                    to: QualifiedPlace::new(to.clone(), Some(self.def_id)),
+                    from: QualifiedPlace::new(from.clone(), Some(from_def_id)),
+                    to: QualifiedPlace::new(to.clone(), Some(to_def_id)),
                 };
                 debug!("adding {:?}", c);
                 self.cx.constraints.edges.insert(c);
 
                 self.add_place_constraints_recursive(
                     self.cx.tcx.mk_place_deref(from),
+                    from_def_id,
                     self.cx.tcx.mk_place_deref(to),
+                    to_def_id,
                     ty
                 );
             },
             TyKind::Ref(_, inner_ty, _) => self.add_place_constraints_recursive(
                 self.cx.tcx.mk_place_deref(from),
+                from_def_id,
                 self.cx.tcx.mk_place_deref(to),
+                to_def_id,
                 inner_ty
             ),
             TyKind::Tuple(_) => {
                 for (i, field_ty) in ty.tuple_fields().enumerate() {
                     self.add_place_constraints_recursive(
                         self.cx.tcx.mk_place_field(from.clone(), Field::from_usize(i), field_ty),
+                        from_def_id,
                         self.cx.tcx.mk_place_field(to.clone(), Field::from_usize(i), field_ty),
+                        to_def_id,
                         field_ty
                     );
                 }
@@ -93,13 +102,25 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         let from_ty = from.ty(self.mir, self.cx.tcx).ty;
         if let TyKind::RawPtr(TypeAndMut { ty, .. }) = from_ty.kind {
             if self.names_c_void(ty) {
-                self.add_place_constraints_recursive(from.clone(), to.clone(), from_ty);
+                self.add_place_constraints_recursive(
+                    from.clone(),
+                    self.def_id,
+                    to.clone(),
+                    self.def_id,
+                    from_ty
+                );
                 return;
             }
         }
 
         let to_ty = to.ty(self.mir, self.cx.tcx).ty;
-        self.add_place_constraints_recursive(from.clone(), to.clone(), to_ty);
+        self.add_place_constraints_recursive(
+            from.clone(),
+            self.def_id,
+            to.clone(),
+            self.def_id,
+            to_ty
+        );
     }
 
     fn add_place_taint(&mut self, place: &Place<'tcx>, reason: Taint<'tcx>) {
@@ -178,21 +199,23 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         }
     }
 
+    fn add_operand_constraints(&mut self, lv: &Place<'tcx>, op: &Operand<'tcx>) {
+        debug!("        constraint(=) {:?} --> {:?}", lv, op);
+        match op {
+            Operand::Copy(place)
+            | Operand::Move(place) => {
+                self.add_place_constraints(lv, place);
+            },
+            Operand::Constant(_) => {},
+        }
+    }
+
     fn analyze_statement(&mut self, lv: &Place<'tcx>, rv: &Rvalue<'tcx>) {
         match *rv {
-            Rvalue::Use(ref op) => {
-                debug!("        constraint(=) {:?} --> {:?}", lv, op);
-                match op {
-                    Operand::Copy(place)
-                    | Operand::Move(place) => {
-                        self.add_place_constraints(lv, place);
-                    },
-                    Operand::Constant(_) => {},
-                }
-            },
+            Rvalue::Use(ref op) => self.add_operand_constraints(lv, op),
             Rvalue::Ref(_, _, ref op) => {
                 debug!("        constraint(&) *{:?} --> {:?}", lv, op);
-                self.add_place_constraints(&self.cx.tcx.mk_place_deref(lv.clone()), op);
+                self.add_place_constraints(&self.cx.tcx.mk_place_deref(lv.clone()),op);
             },
             Rvalue::Cast(kind, ref op, cast_ty) => {
                 debug!("        constraint(C) {:?} --> {:?}", lv, op);
@@ -252,16 +275,64 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                 ref location,
                 ref value,
                 ..
-            } => {
-                debug!("    {:?} <=d/r= {:?}", location, value);
-            },
+            } => self.add_operand_constraints(location, value),
             TerminatorKind::Call {
                 ref func,
                 ref args,
                 ref destination,
                 ..
-            } => {
-                debug!("    {:?} = {:?}({:?})", destination, func, args);
+            } => match func {
+                Operand::Constant(ref c) => {
+                    let fn_def_id = match c.literal.ty.kind {
+                        TyKind::FnDef(def_id, _) => def_id,
+                        _ => unimplemented!(),
+                    };
+                    let fn_str = self.cx.tcx.def_path_str(fn_def_id);
+                    debug!("    call_const {:?} = {}({:?})", destination, fn_str, args);
+
+                    for (i, arg) in args.iter().enumerate() {
+                        let callee_place = Place {
+                            base: PlaceBase::Local(Local::from_usize(i + 1)),
+                            projection: self.cx.tcx.intern_place_elems(&[]),
+                        };
+                        debug!("        constraint(a) {}::{:?} --> {:?}", fn_str, callee_place, arg);
+                        match arg {
+                            Operand::Copy(place)
+                            | Operand::Move(place) => self.add_place_constraints_recursive(
+                                callee_place,
+                                fn_def_id,
+                                place.clone(),
+                                self.def_id,
+                                place.ty(self.mir, self.cx.tcx).ty,
+                            ),
+                            Operand::Constant(_) => {},
+                        }
+                    }
+
+                    if let Some((retval, _)) = destination {
+                        let callee_place = Place {
+                            base: PlaceBase::Local(Local::from_usize(0)),
+                            projection: self.cx.tcx.intern_place_elems(&[]),
+                        };
+                        debug!("        constraint(r) {:?} --> {}::{:?}", retval, fn_str, callee_place);
+                        self.add_place_constraints_recursive(
+                            retval.clone(),
+                            self.def_id,
+                            callee_place,
+                            fn_def_id,
+                            retval.ty(self.mir, self.cx.tcx).ty,
+                        );
+                    }
+                },
+                Operand::Copy(place)
+                | Operand::Move(place) => {
+                    for arg in args.iter() {
+                        debug!("        {:?} passed to opaque {:?}", arg, place);
+                        self.add_operand_taint(arg, Taint::PassedToOpaqueFnPointer(
+                            QualifiedPlace::new(place.clone(), Some(self.def_id))
+                        ));
+                    }
+                }
             },
             _ => {},
         }

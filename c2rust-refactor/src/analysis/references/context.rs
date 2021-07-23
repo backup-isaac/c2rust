@@ -88,13 +88,19 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
         }
 
         let tainted_values = constraints.solve();
+        debug!("tainted values:");
         for (tainted, reason) in tainted_values {
+            debug!("  {:?}: {:?}", tainted, reason);
             let place = tainted.place();
             match place.base {
                 PlaceBase::Local(l) => {
                     let locals = functions
-                        .get_mut(&tainted.func().expect("malformed QualifiedPlace"))
-                        .expect("QualifiedPlace referes to unknown function");
+                        .get_mut(&tainted.func().expect("malformed QualifiedPlace"));
+                    if locals.is_none() {
+                        debug!("QualifiedPlace referes to unknown/stdlib function {:?}", tcx.def_path_str(tainted.func().unwrap()));
+                        continue;
+                    }
+                    let locals = locals.unwrap();
                     let base_lty = locals[l].node;
                     let modified_lty = taint_lty(
                         &lcx,

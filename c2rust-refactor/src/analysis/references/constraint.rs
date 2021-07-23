@@ -42,10 +42,14 @@ pub struct Constraint<'tcx> {
 #[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub enum Taint<'tcx> {
     UsedInArithmetic,
+    // Cast to a pointer of another type, excluding `void *`
     UsedInPtrCast,
     PassedToKnownTaintedFn(DefId),
     PassedToOpaqueFnPointer(QualifiedPlace<'tcx>),
     PassedToExternFn(DefId),
+    // Returned from a public function, exposed as a public global variable,
+    // or as a public struct field
+    ExposedPublicly(QualifiedPlace<'tcx>),
 }
 
 pub struct Constraints<'tcx> {
@@ -62,7 +66,6 @@ impl<'tcx> Constraints<'tcx> {
     }
 
     pub fn add_taint(&mut self, place: QualifiedPlace<'tcx>, reason: Taint<'tcx>) -> bool {
-        debug!("taint {:?} = {:?}", place, reason);
         match self.taints.entry(place) {
             Entry::Vacant(e) => {
                 e.insert(reason);
