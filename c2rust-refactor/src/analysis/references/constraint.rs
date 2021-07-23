@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::collections::hash_map::Entry;
 use std::hash::Hash;
 
@@ -8,7 +8,7 @@ use rustc::mir::*;
 use log::Level;
 /// Associates `Place`s corresponding to local variables with the DefId
 /// of the function in which they were defined.
-#[derive(Debug, Hash, PartialEq, Eq, PartialOrd)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd)]
 pub struct QualifiedPlace<'tcx>(Place<'tcx>, Option<DefId>);
 
 impl<'tcx> QualifiedPlace<'tcx> {
@@ -21,9 +21,17 @@ impl<'tcx> QualifiedPlace<'tcx> {
             QualifiedPlace(place, None)
         }
     }
+
+    pub fn place(&self) -> &Place<'tcx> {
+        &self.0
+    }
+
+    pub fn func(&self) -> Option<DefId> {
+        self.1
+    }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Constraint<'tcx> {
     pub from: QualifiedPlace<'tcx>,
     pub to: QualifiedPlace<'tcx>,
@@ -31,7 +39,7 @@ pub struct Constraint<'tcx> {
 
 // unsure if I will keep this
 /// Might be useful to show the programmer what is preventing conversion to reference
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub enum Taint<'tcx> {
     UsedInArithmetic,
     UsedInPtrCast,
@@ -53,16 +61,45 @@ impl<'tcx> Constraints<'tcx> {
         }
     }
 
-    pub fn add_taint(&mut self, place: QualifiedPlace<'tcx>, reason: Taint<'tcx>) {
+    pub fn add_taint(&mut self, place: QualifiedPlace<'tcx>, reason: Taint<'tcx>) -> bool {
         debug!("taint {:?} = {:?}", place, reason);
         match self.taints.entry(place) {
             Entry::Vacant(e) => {
                 e.insert(reason);
+                true
             },
             Entry::Occupied(mut e) => if reason < *e.get() {
                 e.insert(reason);
+                true
+            } else {
+                false
             },
         }
+    }
+
+    pub fn solve(mut self) -> HashMap<QualifiedPlace<'tcx>, Taint<'tcx>> {
+        let mut graph = HashMap::new();
+        for constraint in self.edges.iter() {
+            match graph.entry(constraint.from.clone()) {
+                Entry::Vacant(e) => {
+                    e.insert(vec![constraint.to.clone()]);
+                },
+                Entry::Occupied(mut e) => e.get_mut().push(constraint.to.clone()),
+            }
+        }
+
+        let mut queue = self.taints.iter()
+            .map(|(place, reason)| (place.clone(), reason.clone()))
+            .collect::<VecDeque<_>>();
+        while let Some((place, reason)) = queue.pop_front() {
+            for succ in graph.get(&place).unwrap_or(&vec![]) {
+                if self.add_taint(succ.clone(), reason.clone()) {
+                    queue.push_back((succ.clone(), reason.clone()));
+                }
+            }
+        }
+
+        self.taints
     }
 
     pub fn debug_constraints(&self) {
