@@ -36,7 +36,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         to: Place<'tcx>,
         to_def_id: DefId,
         ty: Ty<'tcx>,
-    ) {
+    ) -> bool {
         match ty.kind {
             TyKind::Array(inner_ty, _)
             | TyKind::Slice(inner_ty) => self.add_place_constraints_recursive(
@@ -54,15 +54,17 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                     to: QualifiedPlace::new(to.clone(), Some(to_def_id)),
                 };
                 debug!("adding {:?}", c);
-                self.cx.constraints.edges.insert(c);
+                let mut added = self.cx.constraints.edges.insert(c);
 
-                self.add_place_constraints_recursive(
+                added |= self.add_place_constraints_recursive(
                     self.cx.tcx.mk_place_deref(from),
                     from_def_id,
                     self.cx.tcx.mk_place_deref(to),
                     to_def_id,
                     ty
                 );
+
+                added
             },
             TyKind::Ref(_, inner_ty, _) => self.add_place_constraints_recursive(
                 self.cx.tcx.mk_place_deref(from),
@@ -72,8 +74,9 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                 inner_ty
             ),
             TyKind::Tuple(_) => {
+                let mut added = false;
                 for (i, field_ty) in ty.tuple_fields().enumerate() {
-                    self.add_place_constraints_recursive(
+                    added |= self.add_place_constraints_recursive(
                         self.cx.tcx.mk_place_field(from.clone(), Field::from_usize(i), field_ty),
                         from_def_id,
                         self.cx.tcx.mk_place_field(to.clone(), Field::from_usize(i), field_ty),
@@ -81,8 +84,9 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                         field_ty
                     );
                 }
+                added
             },
-            _ => {},
+            _ => false,
         }
     }
 
@@ -255,8 +259,11 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         }
     }
 
-    // TODO: encapsulate this elsewhere?
-    pub fn analyze_basic_block(&mut self, bbid: BasicBlock, bb: &BasicBlockData<'tcx>) {
+    pub fn analyze_basic_block(
+        &mut self,
+        bbid: BasicBlock,
+        bb: &BasicBlockData<'tcx>,
+    ) -> Option<DefId> {
         debug!("  {:?}", bbid);
 
         for s in bb.statements.iter() {
@@ -290,13 +297,14 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                     let fn_str = self.cx.tcx.def_path_str(fn_def_id);
                     debug!("    call_const {:?} = {}({:?})", destination, fn_str, args);
 
+                    let mut depend_on_fn_analysis = false;
                     for (i, arg) in args.iter().enumerate() {
                         let callee_place = Place {
                             base: PlaceBase::Local(Local::from_usize(i + 1)),
                             projection: self.cx.tcx.intern_place_elems(&[]),
                         };
                         debug!("        constraint(a) {}::{:?} --> {:?}", fn_str, callee_place, arg);
-                        match arg {
+                        depend_on_fn_analysis |= match arg {
                             Operand::Copy(place)
                             | Operand::Move(place) => self.add_place_constraints_recursive(
                                 callee_place,
@@ -305,23 +313,30 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                                 self.def_id,
                                 place.ty(self.mir, self.cx.tcx).ty,
                             ),
-                            Operand::Constant(_) => {},
-                        }
+                            Operand::Constant(_) => false,
+                        };
                     }
 
-                    if let Some((retval, _)) = destination {
-                        let callee_place = Place {
-                            base: PlaceBase::Local(Local::from_usize(0)),
-                            projection: self.cx.tcx.intern_place_elems(&[]),
-                        };
-                        debug!("        constraint(r) {:?} --> {}::{:?}", retval, fn_str, callee_place);
-                        self.add_place_constraints_recursive(
-                            retval.clone(),
-                            self.def_id,
-                            callee_place,
-                            fn_def_id,
-                            retval.ty(self.mir, self.cx.tcx).ty,
-                        );
+                    if depend_on_fn_analysis {
+                        if self.def_id.krate == fn_def_id.krate {
+                            if let Some((retval, _)) = destination {
+                                let callee_place = Place {
+                                    base: PlaceBase::Local(Local::from_usize(0)),
+                                    projection: self.cx.tcx.intern_place_elems(&[]),
+                                };
+                                debug!("        constraint(r) {:?} --> {}::{:?}", retval, fn_str, callee_place);
+                                self.add_place_constraints_recursive(
+                                    retval.clone(),
+                                    self.def_id,
+                                    callee_place,
+                                    fn_def_id,
+                                    retval.ty(self.mir, self.cx.tcx).ty,
+                                );
+                            }
+                        }
+                        return Some(fn_def_id);
+                    } else {
+                        return None;
                     }
                 },
                 Operand::Copy(place)
@@ -336,5 +351,6 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
             },
             _ => {},
         }
+        None
     }
 }
