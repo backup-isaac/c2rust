@@ -1,13 +1,12 @@
 // ty might be a bad name for this module. Fix?
 
-use rustc::hir;
 use rustc::hir::def_id::DefId;
-use rustc::hir::Node;
+use rustc::hir::{ForeignItemKind, ImplItemKind, ItemKind, map, Node, TraitItemKind};
 use rustc_index::vec::Idx;
 
 /// Check if a definition is a `fn` item of some sort.  Note that this does not return true on
 /// closures.
-pub fn is_fn(hir_map: &hir::map::Map, def_id: DefId) -> bool {
+pub fn is_fn(hir_map: &map::Map, def_id: DefId) -> bool {
     let n = match hir_map.get_if_local(def_id) {
         None => return false,
         Some(n) => n,
@@ -15,25 +14,24 @@ pub fn is_fn(hir_map: &hir::map::Map, def_id: DefId) -> bool {
 
     match n {
         Node::Item(i) => match i.kind {
-            hir::ItemKind::Fn(..) => true,
+            ItemKind::Fn(..) => true,
             _ => false,
         },
         Node::ForeignItem(i) => match i.kind {
-            hir::ForeignItemKind::Fn(..) => true,
+            ForeignItemKind::Fn(..) => true,
             _ => false,
         },
         Node::TraitItem(i) => match i.kind {
-            hir::TraitItemKind::Method(..) => true,
+            TraitItemKind::Method(..) => true,
             _ => false,
         },
         Node::ImplItem(i) => match i.kind {
-            hir::ImplItemKind::Method(..) => true,
+            ImplItemKind::Method(..) => true,
             _ => false,
         },
         _ => false,
     }
 }
-
 
 /// A variable index.
 ///
