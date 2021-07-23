@@ -41,6 +41,8 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
     // TODO: handle provided annotations and marks
 
     cx.analyze_intra();
+    // TODO: cx.analyze_externs()
+
     debug!("before propagation:");
     cx.constraints.debug_constraints();
     let (statics, functions) = cx.into_results();

@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::iter::FromIterator;
 
 use arena::SyncDroplessArena;
-use rustc::hir::def_id::DefId;
+use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::mir::*;
 use rustc::ty::{List, Ty, TyCtxt, TyKind};
 use rustc_index::vec::IndexVec;
@@ -19,30 +20,45 @@ pub struct Ctxt<'lty, 'tcx> {
     pub arena: &'lty SyncDroplessArena,
     pub constraints: Constraints<'tcx>,
 
-    funcs: Vec<DefId>,
+    funcs: HashSet<DefId>,
+    opaque_func_decls: HashSet<DefId>,
 }
 
 impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
     pub fn new(
         tcx: TyCtxt<'tcx>,
         arena: &'lty SyncDroplessArena,
-        funcs: Vec<DefId>,
+        funcs: HashSet<DefId>,
     ) -> Ctxt<'lty, 'tcx> {
         Ctxt {
             tcx,
             arena,
             constraints: Constraints::new(),
             funcs,
+            opaque_func_decls: HashSet::new(),
         }
     }
 
     pub fn analyze_intra(&mut self) {
-        for def_id in self.funcs.clone() {
+        let mut worklist = Vec::from_iter(self.funcs.iter().copied());
+        while let Some(def_id) = worklist.pop() {
             let mir = self.tcx.optimized_mir(def_id);
             let mut func_cx = FuncCtxt::new(self, def_id, mir);
 
+            let mut collected_def_ids = Vec::new();
             for (bbid, bb) in mir.basic_blocks().iter_enumerated() {
-                func_cx.analyze_basic_block(bbid, bb);
+                if let Some(dependent_def_id) = func_cx.analyze_basic_block(bbid, bb) {
+                    collected_def_ids.push(dependent_def_id);
+                }
+            }
+
+            for dependent_def_id in collected_def_ids {
+                if self.tcx.is_foreign_item(dependent_def_id)
+                || dependent_def_id.krate != def_id.krate {
+                    self.opaque_func_decls.insert(dependent_def_id);
+                } else if self.funcs.insert(dependent_def_id) {
+                    worklist.push(dependent_def_id);
+                }
             }
         }
     }
@@ -51,7 +67,13 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
         HashMap<DefId, RefdTy<'lty, 'tcx>>, // statics
         HashMap<DefId, FunctionResult<'lty, 'tcx>> // functions
     ) {
-        let Self { tcx, arena, constraints, funcs } = self;
+        let Self {
+            tcx,
+            arena,
+            constraints,
+            funcs,
+            opaque_func_decls
+        } = self;
 
         let lcx = LabeledTyCtxt::new(arena);
         let mut functions = HashMap::new();
@@ -87,20 +109,39 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             functions.insert(def_id, locals);
         }
 
+        for &def_id in opaque_func_decls.iter() {
+            let sig = tcx.fn_sig(def_id);
+            let mut locals: IndexVec<Local, Spanned<RefdTy<'lty, 'tcx>>> = IndexVec::new();
+
+            if tcx.is_foreign_item(def_id) {
+                assert_eq!(def_id.krate, LOCAL_CRATE);
+                for (i, ty) in sig.skip_binder().inputs_and_output.iter().enumerate() {
+                    let lty = if i == sig.skip_binder().inputs_and_output.len() - 1 && sig.skip_binder().c_variadic {
+                        lcx.label(ty, &mut |_| None)
+                    } else {
+                        lcx.label(ty, &mut apply_initial_label)
+                    };
+
+                    locals.push(Spanned {
+                        node: lty,
+                        span: DUMMY_SP,
+                    });
+                }
+            }
+        }
+
         let tainted_values = constraints.solve();
         debug!("tainted values:");
         for (tainted, reason) in tainted_values {
-            debug!("  {:?}: {:?}", tainted, reason);
             let place = tainted.place();
             match place.base {
                 PlaceBase::Local(l) => {
                     let locals = functions
                         .get_mut(&tainted.func().expect("malformed QualifiedPlace"));
-                    if locals.is_none() {
-                        debug!("QualifiedPlace referes to unknown/stdlib function {:?}", tcx.def_path_str(tainted.func().unwrap()));
-                        continue;
+                    if tainted.func().unwrap().krate != LOCAL_CRATE {
+                        continue; // does not make sense to try to taint std::{something}
                     }
-                    let locals = locals.unwrap();
+                    let locals = locals.expect("QualifiedPlace referes to unknown function");
                     let base_lty = locals[l].node;
                     let modified_lty = taint_lty(
                         &lcx,
@@ -133,6 +174,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                     StaticKind::Promoted(_, _) => todo!(),
                 },
             }
+            debug!("  {:?}: {:?}", tainted, reason);
         }
 
         let functions = functions.into_iter()
