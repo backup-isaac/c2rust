@@ -127,8 +127,17 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         );
     }
 
-    fn add_place_taint(&mut self, place: &Place<'tcx>, reason: Taint<'tcx>) {
-        match place.ty(self.mir, self.cx.tcx).ty.kind {
+    fn add_place_taint(
+        &mut self,
+        place: &Place<'tcx>,
+        reason: Taint<'tcx>,
+        recursive: bool,
+    ) {
+        let ty = place.ty(self.mir, self.cx.tcx).ty;
+        if recursive {
+            return self.add_place_taint_recursive(place.clone(), reason, ty);
+        }
+        match ty.kind {
             TyKind::RawPtr(_) => {
                 self.cx.constraints.add_taint(
                     QualifiedPlace::new(place.clone(), Some(self.def_id)),
@@ -140,10 +149,57 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         }
     }
 
-    fn add_operand_taint(&mut self, op: &Operand<'tcx>, reason: Taint<'tcx>) {
+    fn add_place_taint_recursive(
+        &mut self,
+        place: Place<'tcx>,
+        reason: Taint<'tcx>,
+        ty: Ty<'tcx>,
+    ) {
+        match ty.kind {
+            TyKind::Array(inner_ty, _)
+            | TyKind::Slice(inner_ty) => self.add_place_taint_recursive(
+                self.cx.tcx.mk_place_index(place, Local::from_usize(0)),
+                reason,
+                inner_ty,
+            ),
+            TyKind::RawPtr(TypeAndMut { ty, .. }) => {
+                self.cx.constraints.add_taint(
+                    QualifiedPlace::new(place.clone(), Some(self.def_id)),
+                    reason.clone(),
+                );
+                self.add_place_taint_recursive(
+                    self.cx.tcx.mk_place_deref(place),
+                    reason,
+                    ty,
+                );
+            }
+            TyKind::Ref(_, inner_ty, _) => self.add_place_taint_recursive(
+                self.cx.tcx.mk_place_deref(place),
+                reason,
+                inner_ty,
+            ),
+            TyKind::Tuple(_) => {
+                for (i, field_ty) in ty.tuple_fields().enumerate() {
+                    self.add_place_taint_recursive(
+                        self.cx.tcx.mk_place_field(place.clone(), Field::from_usize(i), field_ty),
+                        reason.clone(),
+                        field_ty,
+                    );
+                }
+            }
+            _ => {},
+        }
+    }
+
+    fn add_operand_taint(
+        &mut self,
+        op: &Operand<'tcx>,
+        reason: Taint<'tcx>,
+        recursive: bool,
+    ) {
         match op {
             Operand::Copy(place)
-            | Operand::Move(place) => self.add_place_taint(place, reason),
+            | Operand::Move(place) => self.add_place_taint(place, reason, recursive),
             Operand::Constant(_) => {},
         }
     }
@@ -181,13 +237,13 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                             || self.names_c_void(dest_base_ty) {
                                 self.add_place_constraints(lv, place);
                             } else {
-                                self.add_place_taint(place, Taint::UsedInPtrCast);
+                                self.add_place_taint(place, Taint::UsedInPtrCast, true);
                             }
                         }
-                        _ => self.add_place_taint(lv, Taint::UsedInPtrCast),
+                        _ => self.add_place_taint(lv, Taint::UsedInPtrCast, false),
                     },
                     Operand::Constant(c) => if !self.is_constant_zero(c) {
-                        self.add_place_taint(lv, Taint::UsedInPtrCast);
+                        self.add_place_taint(lv, Taint::UsedInPtrCast, false);
                     }
                 }
             },
@@ -234,12 +290,12 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                     | BinOp::Gt => {
                         debug!("        taint(<) {:?}", a);
                         debug!("        taint(<) {:?}", b);
-                        self.add_operand_taint(a, Taint::UsedInArithmetic);
-                        self.add_operand_taint(b, Taint::UsedInArithmetic);
+                        self.add_operand_taint(a, Taint::UsedInArithmetic, false);
+                        self.add_operand_taint(b, Taint::UsedInArithmetic, false);
                     },
                     BinOp::Offset => {
                         debug!("        taint(o) {:?}", a);
-                        self.add_operand_taint(a, Taint::UsedInArithmetic);
+                        self.add_operand_taint(a, Taint::UsedInArithmetic, false);
                     },
                     _ => {},
                 }
@@ -345,7 +401,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                         debug!("        {:?} passed to opaque {:?}", arg, place);
                         self.add_operand_taint(arg, Taint::PassedToOpaqueFnPointer(
                             QualifiedPlace::new(place.clone(), Some(self.def_id))
-                        ));
+                        ), true);
                     }
                 }
             },
