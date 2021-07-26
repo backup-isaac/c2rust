@@ -127,70 +127,6 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         );
     }
 
-    fn add_place_taint(
-        &mut self,
-        place: &Place<'tcx>,
-        reason: Taint<'tcx>,
-        recursive: bool,
-    ) {
-        let ty = place.ty(self.mir, self.cx.tcx).ty;
-        if recursive {
-            return self.add_place_taint_recursive(place.clone(), reason, ty);
-        }
-        match ty.kind {
-            TyKind::RawPtr(_) => {
-                self.cx.constraints.add_taint(
-                    QualifiedPlace::new(place.clone(), Some(self.def_id)),
-                    reason
-                );
-            }
-            TyKind::Ref(_, _, _) => unimplemented!(),
-            _ => {},
-        }
-    }
-
-    fn add_place_taint_recursive(
-        &mut self,
-        place: Place<'tcx>,
-        reason: Taint<'tcx>,
-        ty: Ty<'tcx>,
-    ) {
-        match ty.kind {
-            TyKind::Array(inner_ty, _)
-            | TyKind::Slice(inner_ty) => self.add_place_taint_recursive(
-                self.cx.tcx.mk_place_index(place, Local::from_usize(0)),
-                reason,
-                inner_ty,
-            ),
-            TyKind::RawPtr(TypeAndMut { ty, .. }) => {
-                self.cx.constraints.add_taint(
-                    QualifiedPlace::new(place.clone(), Some(self.def_id)),
-                    reason.clone(),
-                );
-                self.add_place_taint_recursive(
-                    self.cx.tcx.mk_place_deref(place),
-                    reason,
-                    ty,
-                );
-            }
-            TyKind::Ref(_, inner_ty, _) => self.add_place_taint_recursive(
-                self.cx.tcx.mk_place_deref(place),
-                reason,
-                inner_ty,
-            ),
-            TyKind::Tuple(_) => {
-                for (i, field_ty) in ty.tuple_fields().enumerate() {
-                    self.add_place_taint_recursive(
-                        self.cx.tcx.mk_place_field(place.clone(), Field::from_usize(i), field_ty),
-                        reason.clone(),
-                        field_ty,
-                    );
-                }
-            }
-            _ => {},
-        }
-    }
-
     fn add_operand_taint(
         &mut self,
         op: &Operand<'tcx>,
@@ -199,7 +135,22 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
     ) {
         match op {
             Operand::Copy(place)
-            | Operand::Move(place) => self.add_place_taint(place, reason, recursive),
+            | Operand::Move(place) => if recursive {
+                self.cx.constraints.add_place_taint_recursive(
+                    self.cx.tcx,
+                    place.clone(),
+                    self.def_id,
+                    reason,
+                    place.ty(self.mir, self.cx.tcx).ty,
+                );
+            } else {
+                self.cx.constraints.add_place_taint(
+                    place,
+                    self.def_id,
+                    reason,
+                    place.ty(self.mir, self.cx.tcx).ty,
+                )
+            },
             Operand::Constant(_) => {},
         }
     }
@@ -225,25 +176,45 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         op: &Operand<'tcx>,
         cast_ty: Ty<'tcx>
     ) {
+        assert_eq!(lv.ty(self.mir, self.cx.tcx).ty, cast_ty);
         match kind {
             CastKind::Misc => if let TyKind::RawPtr(TypeAndMut { ty: dest_base_ty, .. }) = cast_ty.kind {
                 match op {
                     Operand::Copy(place)
-                    | Operand::Move(place) => match place.ty(self.mir, self.cx.tcx).ty.kind {
-                        TyKind::RawPtr(TypeAndMut { ty: pointee_ty, .. })
-                        | TyKind::Ref(_, pointee_ty, _) => {
-                            if TyS::same_type(pointee_ty, dest_base_ty)
-                            || self.names_c_void(pointee_ty)
-                            || self.names_c_void(dest_base_ty) {
-                                self.add_place_constraints(lv, place);
-                            } else {
-                                self.add_place_taint(place, Taint::UsedInPtrCast, true);
+                    | Operand::Move(place) => {
+                        let place_ty = place.ty(self.mir, self.cx.tcx).ty;
+                        match place_ty.kind {
+                            TyKind::RawPtr(TypeAndMut { ty: pointee_ty, .. })
+                            | TyKind::Ref(_, pointee_ty, _) => {
+                                if TyS::same_type(pointee_ty, dest_base_ty)
+                                || self.names_c_void(pointee_ty)
+                                || self.names_c_void(dest_base_ty) {
+                                    self.add_place_constraints(lv, place);
+                                } else {
+                                    self.cx.constraints.add_place_taint_recursive(
+                                        self.cx.tcx,
+                                        place.clone(),
+                                        self.def_id,
+                                        Taint::UsedInPtrCast,
+                                        place_ty,
+                                    );
+                                }
                             }
+                            _ => self.cx.constraints.add_place_taint(
+                                lv,
+                                self.def_id,
+                                Taint::UsedInPtrCast,
+                                cast_ty,
+                            ),
                         }
-                        _ => self.add_place_taint(lv, Taint::UsedInPtrCast, false),
                     },
                     Operand::Constant(c) => if !self.is_constant_zero(c) {
-                        self.add_place_taint(lv, Taint::UsedInPtrCast, false);
+                        self.cx.constraints.add_place_taint(
+                            lv,
+                            self.def_id,
+                            Taint::UsedInPtrCast,
+                            cast_ty,
+                        );
                     }
                 }
             },
