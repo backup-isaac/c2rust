@@ -10,6 +10,7 @@ use rustc_target::abi::VariantIdx;
 use syntax::source_map::{DUMMY_SP, Spanned};
 
 use crate::analysis::labeled_ty::{FnSig, LabeledTyCtxt};
+use crate::analysis::references::std_taints::get_function_taints;
 
 use super::{FunctionResult, RefLike, RefdTy};
 use super::constraint::{Constraints, Taint};
@@ -96,8 +97,30 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                         arg,
                     );
                 }
+            } else {
+                assert_ne!(def_id.krate, LOCAL_CRATE);
+                debug!("from crate {:?}: {}", def_id.krate, self.tcx.def_path_str(def_id));
+                let taints = get_function_taints(def_id, self.tcx);
+                for (i, ty) in sig.skip_binder().inputs_and_output.iter().enumerate() {
+                    if i >= taints.len() {
+                        break;
+                    }
+                    if taints[i] {
+                        let place = Place {
+                            // The return place _0 comes first in MIR local variables, but it is at the end of `sig`
+                            base: PlaceBase::Local(Local::from_usize((i + 1) % sig.skip_binder().inputs_and_output.len())),
+                            projection: self.tcx.intern_place_elems(&[]),
+                        };
+                        self.constraints.add_place_taint_recursive(
+                            self.tcx,
+                            place,
+                            def_id,
+                            Taint::PassedToKnownTaintedFn(def_id),
+                            ty,
+                        );
+                    }
+                }
             }
-            // TODO: stdlib
         }
     }
 
