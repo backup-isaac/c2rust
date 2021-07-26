@@ -4,6 +4,7 @@ use std::hash::Hash;
 
 use rustc::hir::def_id::DefId;
 use rustc::mir::*;
+use rustc::ty::{Ty, TyCtxt, TyKind, TypeAndMut};
 
 use log::Level;
 /// Associates `Place`s corresponding to local variables with the DefId
@@ -62,6 +63,77 @@ impl<'tcx> Constraints<'tcx> {
         Constraints {
             edges: HashSet::new(),
             taints: HashMap::new(),
+        }
+    }
+
+    pub fn add_place_taint(
+        &mut self,
+        place: &Place<'tcx>,
+        def_id: DefId,
+        reason: Taint<'tcx>,
+        ty: Ty<'tcx>,
+    ) {
+        match ty.kind {
+            TyKind::RawPtr(_) => {
+                self.add_taint(
+                    QualifiedPlace::new(place.clone(), Some(def_id)),
+                    reason
+                );
+            }
+            TyKind::Ref(_, _, _) => unimplemented!(),
+            _ => {},
+        }
+    }
+
+    pub fn add_place_taint_recursive(
+        &mut self,
+        tcx: TyCtxt<'tcx>,
+        place: Place<'tcx>,
+        def_id: DefId,
+        reason: Taint<'tcx>,
+        ty: Ty<'tcx>,
+    ) {
+        match ty.kind {
+            TyKind::Array(inner_ty, _)
+            | TyKind::Slice(inner_ty) => self.add_place_taint_recursive(
+                tcx,
+                tcx.mk_place_index(place, Local::from_usize(0)),
+                def_id,
+                reason,
+                inner_ty,
+            ),
+            TyKind::RawPtr(TypeAndMut { ty, .. }) => {
+                self.add_taint(
+                    QualifiedPlace::new(place.clone(), Some(def_id)),
+                    reason.clone(),
+                );
+                self.add_place_taint_recursive(
+                    tcx,
+                    tcx.mk_place_deref(place),
+                    def_id,
+                    reason,
+                    ty,
+                );
+            }
+            TyKind::Ref(_, inner_ty, _) => self.add_place_taint_recursive(
+                tcx,
+                tcx.mk_place_deref(place),
+                def_id,
+                reason,
+                inner_ty,
+            ),
+            TyKind::Tuple(_) => {
+                for (i, field_ty) in ty.tuple_fields().enumerate() {
+                    self.add_place_taint_recursive(
+                        tcx,
+                        tcx.mk_place_field(place.clone(), Field::from_usize(i), field_ty),
+                        def_id,
+                        reason.clone(),
+                        field_ty,
+                    );
+                }
+            }
+            _ => {},
         }
     }
 
