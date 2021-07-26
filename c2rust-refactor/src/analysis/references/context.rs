@@ -12,7 +12,7 @@ use syntax::source_map::{DUMMY_SP, Spanned};
 use crate::analysis::labeled_ty::{FnSig, LabeledTyCtxt};
 
 use super::{FunctionResult, RefLike, RefdTy};
-use super::constraint::Constraints;
+use super::constraint::{Constraints, Taint};
 use super::func::FuncCtxt;
 
 pub struct Ctxt<'lty, 'tcx> {
@@ -60,6 +60,44 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                     worklist.push(dependent_def_id);
                 }
             }
+        }
+    }
+
+    /// Functions from other crates (e.g. standard library) and `extern` declarations
+    pub fn analyze_opaque_declarations(&mut self) {
+        for &def_id in self.opaque_func_decls.iter() {
+            let sig = self.tcx.fn_sig(def_id);
+            if self.tcx.is_foreign_item(def_id) {
+                assert_eq!(def_id.krate, LOCAL_CRATE);
+                debug!("Tainting extern function {}", self.tcx.def_path_str(def_id));
+                // TODO: user annotations
+
+                self.constraints.add_place_taint_recursive(
+                    self.tcx,
+                    Place {
+                        base: PlaceBase::Local(Local::from_usize(0)),
+                        projection: self.tcx.intern_place_elems(&[]),
+                    },
+                    def_id,
+                    Taint::PassedToExternFn(def_id),
+                    sig.skip_binder().output(),
+                );
+
+                for (i, arg) in sig.skip_binder().inputs().iter().enumerate() {
+                    let place = Place {
+                        base: PlaceBase::Local(Local::from_usize(i + 1)),
+                        projection: self.tcx.intern_place_elems(&[]),
+                    };
+                    self.constraints.add_place_taint_recursive(
+                        self.tcx,
+                        place,
+                        def_id,
+                        Taint::PassedToExternFn(def_id),
+                        arg,
+                    );
+                }
+            }
+            // TODO: stdlib
         }
     }
 
@@ -115,8 +153,15 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
 
             if tcx.is_foreign_item(def_id) {
                 assert_eq!(def_id.krate, LOCAL_CRATE);
-                for (i, ty) in sig.skip_binder().inputs_and_output.iter().enumerate() {
-                    let lty = if i == sig.skip_binder().inputs_and_output.len() - 1 && sig.skip_binder().c_variadic {
+
+                // output is place _0
+                locals.push(Spanned {
+                    node: lcx.label(sig.skip_binder().output(), &mut apply_initial_label),
+                    span: DUMMY_SP,
+                });
+
+                for (i, ty) in sig.skip_binder().inputs().iter().enumerate() {
+                    let lty = if i == sig.skip_binder().inputs().len() - 1 && sig.skip_binder().c_variadic {
                         lcx.label(ty, &mut |_| None)
                     } else {
                         lcx.label(ty, &mut apply_initial_label)
@@ -127,6 +172,8 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                         span: DUMMY_SP,
                     });
                 }
+
+                functions.insert(def_id, locals);
             }
         }
 
