@@ -50,7 +50,7 @@ pub enum Taint<'tcx> {
     PassedToExternFn(DefId),
     // Returned from a public function, exposed as a public global variable,
     // or as a public struct field
-    ExposedPublicly(QualifiedPlace<'tcx>),
+    ExposedPublicly,
 }
 
 pub struct Constraints<'tcx> {
