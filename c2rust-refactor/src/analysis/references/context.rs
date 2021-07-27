@@ -25,7 +25,7 @@ pub struct Ctxt<'lty, 'tcx> {
 
     funcs: HashSet<DefId>,
     opaque_func_decls: HashSet<DefId>,
-    public_exposed_fields: Vec<DefId>,
+    public_types: Vec<DefId>,
 }
 
 impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
@@ -40,7 +40,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             constraints: Constraints::new(),
             funcs,
             opaque_func_decls: HashSet::new(),
-            public_exposed_fields: Vec::new(),
+            public_types: Vec::new(),
         }
     }
 
@@ -176,33 +176,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                 ty,
             );
         }
-        for &def_id in visitor.public_types.iter() {
-            let adt = self.tcx.adt_def(def_id);
-            for variant in adt.variants.iter() {
-                for field in variant.fields.iter() {
-                    if let Visibility::Public = field.vis {
-                        self.public_exposed_fields.push(field.did);
-                    }
-                    // This circumvents the taints-and-constraints machinery and will ultimately
-                    // mark the struct field _after_ everything else. This is necessary because
-                    // there isn't necessarily an actual Place (local or global variable) which
-                    // uses the field. This is sound because if the field is used in a way that
-                    // would taint it, that's already represented by existing taints and constraints
-                    // and trying to further apply Taint::ExposedPublicly will not change anything.
-                    // Furthermore, if any variable depends on the struct field, that constraint
-                    // already exists and it involves an actual Place. Demonstrated with an example:
-                    //
-                    // pub struct Cool { pub data: *mut u32 }
-                    // let c1: *mut Cool = ...
-                    // let x1 = (*c1).data; // constraint x1 --> (*c1).data, will taint the struct field if x1 is tainted
-                    // let x2: *mut u32 = ...
-                    // (*c1).data = x2; // constraint (*c1).data --> x2, an ExposedPublicly taint on the struct field will
-                    //                  // only taint x2 if there is any possibility of (*c1) having that taint
-                    //                  // i.e. if c1 is completely local and (*c1).data is reflike it doesn't matter that
-                    //                  // someone could construct a Cool with non-reflike data elsewhere
-                }
-            }
-        }
+        self.public_types = visitor.public_types;
     }
 
     pub fn into_results(self) -> (
@@ -215,7 +189,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             constraints,
             funcs,
             opaque_func_decls,
-            public_exposed_fields,
+            public_types,
         } = self;
 
         let lcx = LabeledTyCtxt::new(arena);
@@ -282,6 +256,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             }
         }
 
+        let mut used_types = HashSet::new();
         let tainted_values = constraints.solve();
         debug!("tainted values:");
         for (tainted, reason) in tainted_values {
@@ -299,6 +274,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                         &lcx,
                         &tcx,
                         &mut statics,
+                        &mut used_types,
                         place.projection,
                         base_lty,
                         None,
@@ -315,6 +291,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                             &lcx,
                             &tcx,
                             &mut statics,
+                            &mut used_types,
                             place.projection,
                             &base_lty,
                             None
@@ -329,10 +306,36 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             debug!("  {:?}: {:?}", tainted, reason);
         }
 
-        debug!("publicly exposed fields:");
-        for def_id in public_exposed_fields {
+        // This circumvents the taints-and-constraints machinery to mark the struct fields _after_ everything
+        // else. This is necessary because there isn't necessarily an actual Place (local or global variable)
+        // which uses the field. This is sound because if the field is used in a way that would taint it,
+        // that's already represented by existing taints and constraints and trying to further apply
+        // Taint::ExposedPublicly will not change anything. Furthermore, if any variable depends on the struct
+        // field, that constraint already exists and it involves an actual Place. Demonstrated with an example:
+        //
+        // pub struct Cool { pub data: *mut u32 }
+        // let c1: *mut Cool = ...
+        // let x1 = (*c1).data; // constraint x1 --> (*c1).data, will taint the struct field if x1 is tainted
+        // let x2: *mut u32 = ...
+        // (*c1).data = x2; // constraint (*c1).data --> x2, an ExposedPublicly taint on the struct field will
+        //                  // only taint x2 if there is any possibility of (*c1) having that taint
+        //                  // i.e. if c1 is completely local and (*c1).data is reflike it doesn't matter that
+        //                  // someone could construct a Cool with non-reflike data elsewhere
+        debug!("publicly exposed types:");
+        for def_id in public_types {
+            if !used_types.contains(&def_id) {
+                continue;
+            }
             debug!("  {}", tcx.def_path_str(def_id));
-            statics.entry(def_id).or_insert_with(|| lcx.label(tcx.type_of(def_id), &mut apply_complete_taint));
+            let adt = tcx.adt_def(def_id);
+            for variant in adt.variants.iter() {
+                for field in variant.fields.iter() {
+                    if let Visibility::Public = field.vis {
+                        statics.entry(field.did)
+                            .or_insert_with(|| lcx.label(tcx.type_of(field.did), &mut publicly_exposed));
+                    }
+                }
+            }
         }
 
         let functions = functions.into_iter()
@@ -370,6 +373,7 @@ fn taint_lty<'lty, 'tcx>(
     lcx: &LabeledTyCtxt<'lty, Option<RefLike>>,
     tcx: &TyCtxt<'tcx>,
     statics: &mut HashMap<DefId, RefdTy<'lty, 'tcx>>,
+    used_types: &mut HashSet<DefId>,
     projection: &'tcx List<PlaceElem<'tcx>>,
     lty: RefdTy<'lty, 'tcx>,
     variant: Option<VariantIdx>,
@@ -386,6 +390,7 @@ fn taint_lty<'lty, 'tcx>(
                     lcx,
                     tcx,
                     statics,
+                    used_types,
                     remaining_projection,
                     lty.args[0],
                     None,
@@ -408,12 +413,14 @@ fn taint_lty<'lty, 'tcx>(
                         lcx,
                         tcx,
                         statics,
+                        used_types,
                         remaining_projection,
                         lcx.subst(&field_lty, &lty.args),
                         None,
                     );
                     if tainted_field != field_lty {
                         statics.insert(field_def.did, tainted_field);
+                        used_types.insert(adt.did);
                     }
                     lty
                 },
@@ -423,6 +430,7 @@ fn taint_lty<'lty, 'tcx>(
                         lcx,
                         tcx,
                         statics,
+                        used_types,
                         remaining_projection,
                         lty.args[i],
                         None
@@ -439,6 +447,7 @@ fn taint_lty<'lty, 'tcx>(
                 lcx,
                 tcx,
                 statics,
+                used_types,
                 remaining_projection,
                 lty,
                 Some(*variant),
@@ -466,7 +475,7 @@ fn apply_initial_label<'tcx>(ty: Ty<'tcx>) -> Option<RefLike> {
     }
 }
 
-fn apply_complete_taint<'tcx>(ty: Ty<'tcx>) -> Option<RefLike> {
+fn publicly_exposed<'tcx>(ty: Ty<'tcx>) -> Option<RefLike> {
     match ty.kind {
         // TODO: does this also need TyKind::Ref?
         TyKind::RawPtr(_) => Some(false),
