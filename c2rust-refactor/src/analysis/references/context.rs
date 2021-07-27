@@ -3,8 +3,10 @@ use std::iter::FromIterator;
 
 use arena::SyncDroplessArena;
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
+use rustc::hir::{ForeignItemKind, ImplItem, ImplItemKind, Item, ItemKind, TraitItem, TraitItemKind, VisibilityKind};
+use rustc::hir::itemlikevisit::ItemLikeVisitor;
 use rustc::mir::*;
-use rustc::ty::{List, Ty, TyCtxt, TyKind};
+use rustc::ty::{List, Ty, TyCtxt, TyKind, Visibility};
 use rustc_index::vec::IndexVec;
 use rustc_target::abi::VariantIdx;
 use syntax::source_map::{DUMMY_SP, Spanned};
@@ -23,6 +25,7 @@ pub struct Ctxt<'lty, 'tcx> {
 
     funcs: HashSet<DefId>,
     opaque_func_decls: HashSet<DefId>,
+    public_exposed_fields: Vec<DefId>,
 }
 
 impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
@@ -37,6 +40,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             constraints: Constraints::new(),
             funcs,
             opaque_func_decls: HashSet::new(),
+            public_exposed_fields: Vec::new(),
         }
     }
 
@@ -99,8 +103,8 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                 }
             } else {
                 assert_ne!(def_id.krate, LOCAL_CRATE);
-                debug!("from crate {:?}: {}", def_id.krate, self.tcx.def_path_str(def_id));
                 let taints = get_function_taints(def_id, self.tcx);
+                debug!("{:?}::{} signature taints: {:?}", def_id.krate, self.tcx.def_path_str(def_id), taints);
                 for (i, ty) in sig.skip_binder().inputs_and_output.iter().enumerate() {
                     if i >= taints.len() {
                         break;
@@ -124,6 +128,83 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
         }
     }
 
+    pub fn analyze_public_values(&mut self) {
+        let mut visitor = Visitor {
+            funcs: &self.funcs,
+            opaque_func_decls: &self.opaque_func_decls,
+            public_funcs: vec![],
+            public_globals: vec![],
+            public_types: vec![],
+        };
+
+        self.tcx.hir().krate().visit_all_item_likes(&mut visitor);
+
+        for &def_id in visitor.public_funcs.iter() {
+            debug!("Tainting return of public function {}", self.tcx.def_path_str(def_id));
+
+            let place = Place {
+                base: PlaceBase::Local(Local::from_usize(0)),
+                projection: self.tcx.intern_place_elems(&[]),
+            };
+
+            self.constraints.add_place_taint_recursive(
+                self.tcx,
+                place.clone(),
+                def_id,
+                Taint::ExposedPublicly,
+                self.tcx.fn_sig(def_id).skip_binder().output(),
+            );
+        }
+        for &def_id in visitor.public_globals.iter() {
+            debug!("Tainting public global {}", self.tcx.def_path_str(def_id));
+
+            let ty = self.tcx.type_of(def_id);
+            let place = Place {
+                base: PlaceBase::Static(Box::new(Static {
+                    ty,
+                    kind: StaticKind::Static,
+                    def_id,
+                })),
+                projection: self.tcx.intern_place_elems(&[]),
+            };
+
+            self.constraints.add_place_taint_recursive(
+                self.tcx,
+                place.clone(),
+                def_id,
+                Taint::ExposedPublicly,
+                ty,
+            );
+        }
+        for &def_id in visitor.public_types.iter() {
+            let adt = self.tcx.adt_def(def_id);
+            for variant in adt.variants.iter() {
+                for field in variant.fields.iter() {
+                    if let Visibility::Public = field.vis {
+                        self.public_exposed_fields.push(field.did);
+                    }
+                    // This circumvents the taints-and-constraints machinery and will ultimately
+                    // mark the struct field _after_ everything else. This is necessary because
+                    // there isn't necessarily an actual Place (local or global variable) which
+                    // uses the field. This is sound because if the field is used in a way that
+                    // would taint it, that's already represented by existing taints and constraints
+                    // and trying to further apply Taint::ExposedPublicly will not change anything.
+                    // Furthermore, if any variable depends on the struct field, that constraint
+                    // already exists and it involves an actual Place. Demonstrated with an example:
+                    //
+                    // pub struct Cool { pub data: *mut u32 }
+                    // let c1: *mut Cool = ...
+                    // let x1 = (*c1).data; // constraint x1 --> (*c1).data, will taint the struct field if x1 is tainted
+                    // let x2: *mut u32 = ...
+                    // (*c1).data = x2; // constraint (*c1).data --> x2, an ExposedPublicly taint on the struct field will
+                    //                  // only taint x2 if there is any possibility of (*c1) having that taint
+                    //                  // i.e. if c1 is completely local and (*c1).data is reflike it doesn't matter that
+                    //                  // someone could construct a Cool with non-reflike data elsewhere
+                }
+            }
+        }
+    }
+
     pub fn into_results(self) -> (
         HashMap<DefId, RefdTy<'lty, 'tcx>>, // statics
         HashMap<DefId, FunctionResult<'lty, 'tcx>> // functions
@@ -133,7 +214,8 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             arena,
             constraints,
             funcs,
-            opaque_func_decls
+            opaque_func_decls,
+            public_exposed_fields,
         } = self;
 
         let lcx = LabeledTyCtxt::new(arena);
@@ -245,6 +327,12 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                 },
             }
             debug!("  {:?}: {:?}", tainted, reason);
+        }
+
+        debug!("publicly exposed fields:");
+        for def_id in public_exposed_fields {
+            debug!("  {}", tcx.def_path_str(def_id));
+            statics.entry(def_id).or_insert_with(|| lcx.label(tcx.type_of(def_id), &mut apply_complete_taint));
         }
 
         let functions = functions.into_iter()
@@ -375,5 +463,83 @@ fn apply_initial_label<'tcx>(ty: Ty<'tcx>) -> Option<RefLike> {
             unimplemented!()
         },
         _ => None,
+    }
+}
+
+fn apply_complete_taint<'tcx>(ty: Ty<'tcx>) -> Option<RefLike> {
+    match ty.kind {
+        // TODO: does this also need TyKind::Ref?
+        TyKind::RawPtr(_) => Some(false),
+        TyKind::FnDef(def_id, _) => {
+            debug!("nested? def {:?}", def_id);
+            unimplemented!()
+        },
+        _ => None,
+    }
+}
+
+struct Visitor<'a> {
+    funcs: &'a HashSet<DefId>,
+    opaque_func_decls: &'a HashSet<DefId>,
+    public_funcs: Vec<DefId>,
+    public_globals: Vec<DefId>,
+    public_types: Vec<DefId>,
+}
+
+impl<'hir, 'a> ItemLikeVisitor<'hir> for Visitor<'a> {
+    fn visit_item(&mut self, item: &'hir Item) {
+        let def_id = item.hir_id.owner_def_id();
+        match &item.kind {
+            ItemKind::Static(_, _, _) => if let VisibilityKind::Public = item.vis.node {
+                self.public_globals.push(def_id);
+            },
+            ItemKind::Fn(_, _, _) => if let VisibilityKind::Public = item.vis.node {
+                if self.funcs.contains(&def_id) {
+                    self.public_funcs.push(def_id);
+                }
+            },
+            ItemKind::ForeignMod(f) => {
+                for foreign_item in f.items.iter() {
+                    let f_def_id = foreign_item.hir_id.owner_def_id();
+                    if let VisibilityKind::Public = foreign_item.vis.node {
+                        match &foreign_item.kind {
+                            ForeignItemKind::Fn(_, _, _) => if self.opaque_func_decls.contains(&f_def_id) {
+                                self.public_funcs.push(f_def_id);
+                            },
+                            ForeignItemKind::Static(_, _) => {
+                                self.public_globals.push(f_def_id);
+                            },
+                            ForeignItemKind::Type => {},
+                        }
+                    }
+                }
+            },
+            ItemKind::Enum(_, _)
+            | ItemKind::Struct(_, _)
+            | ItemKind::Union(_, _) => if let VisibilityKind::Public = item.vis.node {
+                self.public_types.push(def_id);
+            },
+            _ => {},
+        }
+    }
+
+    fn visit_trait_item(&mut self, item: &'hir TraitItem) {
+        let def_id = item.hir_id.owner_def_id();
+        if let TraitItemKind::Method(_, _) = item.kind {
+            if self.funcs.contains(&def_id) || self.opaque_func_decls.contains(&def_id) {
+                self.public_funcs.push(def_id);
+            }
+        }
+    }
+
+    fn visit_impl_item(&mut self, item: &'hir ImplItem) {
+        let def_id = item.hir_id.owner_def_id();
+        if let VisibilityKind::Public = item.vis.node {
+            if let ImplItemKind::Method(_, _) = item.kind {
+                if self.funcs.contains(&def_id) {
+                    self.public_funcs.push(def_id);
+                }
+            }
+        }
     }
 }
