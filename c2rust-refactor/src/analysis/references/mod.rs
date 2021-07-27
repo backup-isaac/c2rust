@@ -43,6 +43,7 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
 
     cx.analyze_intra();
     cx.analyze_opaque_declarations();
+    cx.analyze_public_values();
 
     debug!("before propagation:");
     cx.constraints.debug_constraints();
