@@ -3,9 +3,8 @@ use rustc::mir::*;
 use rustc::mir::interpret::{ConstValue, Scalar};
 use rustc::ty::{ConstKind, Ty, TyKind, TypeAndMut, TyS};
 
-use c2rust_ast_builder::IntoSymbol;
-
 use crate::analysis::references::constraint::Taint;
+use crate::analysis::ty::names_c_void;
 
 use super::constraint::{Constraint, QualifiedPlace};
 use super::context::Ctxt;
@@ -105,7 +104,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
     fn add_place_constraints(&mut self, from: &Place<'tcx>, to: &Place<'tcx>) {
         let from_ty = from.ty(self.mir, self.cx.tcx).ty;
         if let TyKind::RawPtr(TypeAndMut { ty, .. }) = from_ty.kind {
-            if self.names_c_void(ty) {
+            if names_c_void(self.cx.tcx, ty) {
                 self.add_place_constraints_recursive(
                     from.clone(),
                     self.def_id,
@@ -155,20 +154,6 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         }
     }
 
-    fn names_c_void(&self, ty: Ty<'tcx>) -> bool {
-        if let TyKind::Adt(adt, _) = ty.kind {
-            let def_path = self.cx.tcx.def_path(adt.did);
-
-            if self.cx.tcx.crate_name(def_path.krate) != "core".into_symbol() {
-                return false;
-            }
-
-            return def_path.data.iter().map(|it| it.data.get_opt_name()).collect::<Vec<_>>()
-                == ["ffi", "c_void"].iter().map(|s| Some(s.into_symbol())).collect::<Vec<_>>();
-        }
-        false
-    }
-
     fn analyze_cast(
         &mut self,
         lv: &Place<'tcx>,
@@ -187,8 +172,8 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                             TyKind::RawPtr(TypeAndMut { ty: pointee_ty, .. })
                             | TyKind::Ref(_, pointee_ty, _) => {
                                 if TyS::same_type(pointee_ty, dest_base_ty)
-                                || self.names_c_void(pointee_ty)
-                                || self.names_c_void(dest_base_ty) {
+                                || names_c_void(self.cx.tcx, pointee_ty)
+                                || names_c_void(self.cx.tcx, dest_base_ty) {
                                     self.add_place_constraints(lv, place);
                                 } else {
                                     self.cx.constraints.add_place_taint_recursive(

@@ -3,6 +3,9 @@
 use rustc::hir::def_id::DefId;
 use rustc::hir::{ForeignItemKind, ImplItemKind, ItemKind, map, Node, TraitItemKind};
 use rustc_index::vec::Idx;
+use rustc::ty::{Ty, TyCtxt, TyKind};
+
+use c2rust_ast_builder::IntoSymbol;
 
 /// Check if a definition is a `fn` item of some sort.  Note that this does not return true on
 /// closures.
@@ -31,6 +34,20 @@ pub fn is_fn(hir_map: &map::Map, def_id: DefId) -> bool {
         },
         _ => false,
     }
+}
+
+pub fn names_c_void<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    if let TyKind::Adt(adt, _) = ty.kind {
+        let def_path = tcx.def_path(adt.did);
+
+        if tcx.crate_name(def_path.krate) != "core".into_symbol() {
+            return false;
+        }
+
+        return def_path.data.iter().map(|it| it.data.get_opt_name()).collect::<Vec<_>>()
+            == ["ffi", "c_void"].iter().map(|s| Some(s.into_symbol())).collect::<Vec<_>>();
+    }
+    false
 }
 
 /// A variable index.
