@@ -6,13 +6,14 @@ use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::hir::{ForeignItemKind, ImplItem, ImplItemKind, Item, ItemKind, TraitItem, TraitItemKind, VisibilityKind};
 use rustc::hir::itemlikevisit::ItemLikeVisitor;
 use rustc::mir::*;
-use rustc::ty::{List, Ty, TyCtxt, TyKind, Visibility};
+use rustc::ty::{List, Ty, TyCtxt, TyKind, TypeAndMut, Visibility};
 use rustc_index::vec::IndexVec;
 use rustc_target::abi::VariantIdx;
 use syntax::source_map::{DUMMY_SP, Spanned};
 
 use crate::analysis::labeled_ty::{FnSig, LabeledTyCtxt};
 use crate::analysis::references::std_taints::get_function_taints;
+use crate::analysis::ty::names_c_void;
 
 use super::{FunctionResult, RefLike, RefdTy};
 use super::constraint::{Constraints, Taint};
@@ -204,7 +205,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                 let lty = if l.index() == mir.arg_count && sig.skip_binder().c_variadic {
                     lcx.label(decl.ty, &mut |_| None)
                 } else {
-                    lcx.label(decl.ty, &mut apply_initial_label)
+                    lcx.label(decl.ty, &mut |ty| apply_initial_label(tcx, ty))
                 };
 
                 let span = if let LocalInfo::User(
@@ -235,7 +236,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
 
                 // output is place _0
                 locals.push(Spanned {
-                    node: lcx.label(sig.skip_binder().output(), &mut apply_initial_label),
+                    node: lcx.label(sig.skip_binder().output(), &mut |ty| apply_initial_label(tcx, ty)),
                     span: DUMMY_SP,
                 });
 
@@ -243,7 +244,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                     let lty = if i == sig.skip_binder().inputs().len() - 1 && sig.skip_binder().c_variadic {
                         lcx.label(ty, &mut |_| None)
                     } else {
-                        lcx.label(ty, &mut apply_initial_label)
+                        lcx.label(ty, &mut |ty| apply_initial_label(tcx, ty))
                     };
 
                     locals.push(Spanned {
@@ -286,7 +287,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                 PlaceBase::Static(ref s) => match s.kind {
                     StaticKind::Static => {
                         let base_lty = *statics.entry(s.def_id)
-                            .or_insert_with(|| lcx.label(tcx.type_of(s.def_id), &mut apply_initial_label));
+                            .or_insert_with(|| lcx.label(tcx.type_of(s.def_id), &mut |ty| apply_initial_label(tcx, ty)));
                         let modified_lty = taint_lty(
                             &lcx,
                             &tcx,
@@ -408,7 +409,7 @@ fn taint_lty<'lty, 'tcx>(
                         .fields[f.index()];
 
                     let field_lty = *statics.entry(field_def.did)
-                        .or_insert_with(|| lcx.label(tcx.type_of(field_def.did), &mut apply_initial_label));
+                        .or_insert_with(|| lcx.label(tcx.type_of(field_def.did), &mut |ty| apply_initial_label(*tcx, ty)));
                     let tainted_field = taint_lty(
                         lcx,
                         tcx,
@@ -463,10 +464,10 @@ fn taint_lty<'lty, 'tcx>(
     }
 }
 
-fn apply_initial_label<'tcx>(ty: Ty<'tcx>) -> Option<RefLike> {
+fn apply_initial_label<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<RefLike> {
     match ty.kind {
         // TODO: does this also need TyKind::Ref?
-        TyKind::RawPtr(_) => Some(true),
+        TyKind::RawPtr(TypeAndMut { ty: pointee_ty, .. }) => Some(!names_c_void(tcx, pointee_ty)), // void* should never be reflike
         TyKind::FnDef(def_id, _) => {
             debug!("nested? def {:?}", def_id);
             unimplemented!()
