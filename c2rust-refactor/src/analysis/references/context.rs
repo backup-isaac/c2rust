@@ -11,7 +11,7 @@ use rustc_index::vec::IndexVec;
 use rustc_target::abi::VariantIdx;
 use syntax::source_map::{DUMMY_SP, Spanned};
 
-use crate::analysis::labeled_ty::{FnSig, LabeledTyCtxt};
+use crate::analysis::labeled_ty::{FnSig, LabeledTyCtxt, LabeledTyS};
 use crate::analysis::references::std_taints::get_function_taints;
 use crate::analysis::ty::names_c_void;
 
@@ -27,6 +27,9 @@ pub struct Ctxt<'lty, 'tcx> {
     funcs: HashSet<DefId>,
     opaque_func_decls: HashSet<DefId>,
     public_types: Vec<DefId>,
+
+    provided_statics: HashMap<DefId, RefdTy<'lty, 'tcx>>,
+    provided_functions: HashMap<DefId, &'lty [RefdTy<'lty, 'tcx>]>,
 }
 
 impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
@@ -34,6 +37,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
         tcx: TyCtxt<'tcx>,
         arena: &'lty SyncDroplessArena,
         funcs: HashSet<DefId>,
+        provided_statics: HashMap<DefId, RefdTy<'lty, 'tcx>>,
     ) -> Ctxt<'lty, 'tcx> {
         Ctxt {
             tcx,
@@ -42,6 +46,8 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             funcs,
             opaque_func_decls: HashSet::new(),
             public_types: Vec::new(),
+            provided_statics,
+            provided_functions: HashMap::new(),
         }
     }
 
@@ -157,8 +163,6 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             );
         }
         for &def_id in visitor.public_globals.iter() {
-            debug!("Tainting public global {}", self.tcx.def_path_str(def_id));
-
             let ty = self.tcx.type_of(def_id);
             let place = Place {
                 base: PlaceBase::Static(Box::new(Static {
@@ -169,13 +173,27 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                 projection: self.tcx.intern_place_elems(&[]),
             };
 
-            self.constraints.add_place_taint_recursive(
-                self.tcx,
-                place.clone(),
-                def_id,
-                Taint::ExposedPublicly,
-                ty,
-            );
+            if let Some(&lty) = self.provided_statics.get(&def_id) {
+                debug!("{} provided taint: {:?}", self.tcx.def_path_str(def_id), lty);
+
+                self.constraints.add_place_taint_conditional(
+                    self.tcx,
+                    place,
+                    def_id,
+                    Taint::ExposedPublicly,
+                    lty,
+                );
+            } else {
+                debug!("Tainting public global {}", self.tcx.def_path_str(def_id));
+
+                self.constraints.add_place_taint_recursive(
+                    self.tcx,
+                    place,
+                    def_id,
+                    Taint::ExposedPublicly,
+                    ty,
+                );
+            }
         }
         self.public_types = visitor.public_types;
     }
@@ -191,11 +209,13 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             funcs,
             opaque_func_decls,
             public_types,
+            provided_functions,
+            provided_statics,
         } = self;
 
         let lcx = LabeledTyCtxt::new(arena);
         let mut functions = HashMap::new();
-        let mut statics = HashMap::new();
+        let mut statics = provided_statics.clone();
 
         for &def_id in funcs.iter() {
             let sig = tcx.fn_sig(def_id);
@@ -257,11 +277,19 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             }
         }
 
+        debug_statics(&statics, "provided", tcx);
+
+        let empty = HashMap::new();
         let mut used_types = HashSet::new();
         let tainted_values = constraints.solve();
         debug!("tainted values:");
         for (tainted, reason) in tainted_values {
             let place = tainted.place();
+            let shadow_provided_statics = if reason.can_be_overridden_by_user() {
+                &provided_statics
+            } else {
+                &empty
+            };
             match place.base {
                 PlaceBase::Local(l) => {
                     let locals = functions
@@ -275,9 +303,11 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                         &lcx,
                         &tcx,
                         &mut statics,
+                        shadow_provided_statics,
                         &mut used_types,
                         place.projection,
                         base_lty,
+                        None,
                         None,
                     );
                     if modified_lty != base_lty {
@@ -292,10 +322,15 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                             &lcx,
                             &tcx,
                             &mut statics,
+                            // Feels a bit like a hack, but it will ensure that if taint should not be overridden by user, that fact
+                            // is upheld. crucially when projecting through a field access causes taint_lty to look up what a user
+                            // provided for the struct field
+                            shadow_provided_statics,
                             &mut used_types,
                             place.projection,
                             &base_lty,
-                            None
+                            None,
+                            shadow_provided_statics.get(&s.def_id).map(|x| *x)
                         );
                         if modified_lty != base_lty {
                             statics.insert(s.def_id, modified_lty);
@@ -306,6 +341,8 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             }
             debug!("  {:?}: {:?}", tainted, reason);
         }
+
+        debug_statics(&statics, "after normal taints", tcx);
 
         // This circumvents the taints-and-constraints machinery to mark the struct fields _after_ everything
         // else. This is necessary because there isn't necessarily an actual Place (local or global variable)
@@ -339,6 +376,8 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
             }
         }
 
+        debug_statics(&statics, "after publicly exposed", tcx);
+
         let functions = functions.into_iter()
             .map(|(def_id, locals)| {
                 let sig = tcx.fn_sig(def_id);
@@ -370,14 +409,23 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
     }
 }
 
+fn debug_statics<'lty, 'tcx>(statics: &HashMap<DefId, RefdTy<'lty, 'tcx>>, tag: &'static str, tcx: TyCtxt<'tcx>) {
+    debug!("statics {}:", tag);
+    for (&def_id, &lty) in statics.iter() {
+        debug!("  {}: {:?}", tcx.def_path_str(def_id), lty);
+    }
+}
+
 fn taint_lty<'lty, 'tcx>(
     lcx: &LabeledTyCtxt<'lty, Option<RefLike>>,
     tcx: &TyCtxt<'tcx>,
     statics: &mut HashMap<DefId, RefdTy<'lty, 'tcx>>,
+    provided_statics: &HashMap<DefId, RefdTy<'lty, 'tcx>>,
     used_types: &mut HashSet<DefId>,
     projection: &'tcx List<PlaceElem<'tcx>>,
     lty: RefdTy<'lty, 'tcx>,
     variant: Option<VariantIdx>,
+    user_provided: Option<RefdTy<'lty, 'tcx>>,
 ) -> RefdTy<'lty, 'tcx> {
     let projection = projection.as_ref();
     if let Some(elem) = projection.first() {
@@ -391,10 +439,12 @@ fn taint_lty<'lty, 'tcx>(
                     lcx,
                     tcx,
                     statics,
+                    provided_statics,
                     used_types,
                     remaining_projection,
                     lty.args[0],
                     None,
+                    user_provided.map(|l| l.args[0]),
                 );
                 if tainted_arg == lty.args[0] {
                     lty
@@ -414,10 +464,12 @@ fn taint_lty<'lty, 'tcx>(
                         lcx,
                         tcx,
                         statics,
+                        provided_statics,
                         used_types,
                         remaining_projection,
                         lcx.subst(&field_lty, &lty.args),
                         None,
+                        provided_statics.get(&field_def.did).map(|l| lcx.subst(*l, &lty.args)),
                     );
                     if tainted_field != field_lty {
                         statics.insert(field_def.did, tainted_field);
@@ -431,10 +483,12 @@ fn taint_lty<'lty, 'tcx>(
                         lcx,
                         tcx,
                         statics,
+                        provided_statics,
                         used_types,
                         remaining_projection,
                         lty.args[i],
-                        None
+                        None,
+                        user_provided.map(|l| l.args[i]),
                     );
                     if tainted_arg == lty.args[i] {
                         lty
@@ -448,13 +502,17 @@ fn taint_lty<'lty, 'tcx>(
                 lcx,
                 tcx,
                 statics,
+                provided_statics,
                 used_types,
                 remaining_projection,
                 lty,
                 Some(*variant),
+                user_provided,
             ),
             ProjectionElem::Subslice { .. } => unimplemented!(),
         }
+    } else if let Some(LabeledTyS { label: Some(true), .. }) = user_provided {
+        lty
     } else {
         if let Some(_) = lty.label {
             lcx.mk(lty.ty, lty.args, Some(false))

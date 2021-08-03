@@ -9,6 +9,7 @@ use crate::analysis::ty::is_fn;
 use crate::command::CommandState;
 use crate::RefactorCtxt;
 
+mod annotation;
 mod constraint;
 mod context;
 mod func;
@@ -37,9 +38,12 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
             hir_map.as_local_node_id(def_id).expect("non-local def_id"),
              "target"
         )).collect();
+    let (provided_statics, provided_functions) = annotation::handle_attrs(tcx, arena, st, dcx);
+    debug!("provided statics: {:?}", provided_statics);
+    debug!("provided functions: {:?}", provided_functions);
+    let mut cx = Ctxt::new(tcx, arena, funcs, provided_statics);
 
-    let mut cx = Ctxt::new(tcx, arena, funcs);
-    // TODO: handle provided annotations and marks
+    // TODO: handle provided marks?
 
     cx.analyze_intra();
     cx.analyze_opaque_declarations();

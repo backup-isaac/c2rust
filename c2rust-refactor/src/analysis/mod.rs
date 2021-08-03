@@ -7,6 +7,7 @@ use crate::driver::Phase;
 use arena::SyncDroplessArena;
 use c2rust_ast_builder::IntoSymbol;
 
+pub mod attr;
 pub mod labeled_ty;
 pub mod ownership;
 pub mod references;

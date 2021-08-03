@@ -11,8 +11,8 @@ use rustc::hir::def_id::DefId;
 use rustc_index::vec::IndexVec;
 use syntax::ast;
 use syntax::symbol::Symbol;
-use syntax::visit::{self, Visitor};
 
+use crate::analysis::attr::{AttrVisitor, meta_item_list};
 use crate::ast_manip::Visit;
 use crate::command::CommandState;
 use crate::type_map::{self, TypeSource};
@@ -114,60 +114,6 @@ pub fn handle_marks<'a, 'tcx, 'lty>(
             }
             _ => panic!("expected Static or Sig var, but got {:?}", p),
         }
-    }
-}
-
-struct AttrVisitor<'ast> {
-    def_attrs: Vec<(ast::NodeId, &'ast [ast::Attribute])>,
-}
-
-impl<'ast> Visitor<'ast> for AttrVisitor<'ast> {
-    fn visit_item(&mut self, i: &'ast ast::Item) {
-        match i.kind {
-            ast::ItemKind::Fn(..) | ast::ItemKind::Static(..) | ast::ItemKind::Const(..) => {
-                if !i.attrs.is_empty() {
-                    self.def_attrs.push((i.id, &i.attrs));
-                }
-            }
-            _ => {}
-        }
-
-        visit::walk_item(self, i);
-    }
-
-    fn visit_impl_item(&mut self, i: &'ast ast::ImplItem) {
-        match i.kind {
-            ast::ImplItemKind::Method(..) | ast::ImplItemKind::Const(..) => {
-                if !i.attrs.is_empty() {
-                    self.def_attrs.push((i.id, &i.attrs));
-                }
-            }
-            _ => {}
-        }
-
-        visit::walk_impl_item(self, i);
-    }
-
-    fn visit_foreign_item(&mut self, i: &'ast ast::ForeignItem) {
-        match i.kind {
-            // TODO: Foreign statics?
-            ast::ForeignItemKind::Fn(..) => {
-                if !i.attrs.is_empty() {
-                    self.def_attrs.push((i.id, &i.attrs));
-                }
-            }
-            _ => {}
-        }
-
-        visit::walk_foreign_item(self, i);
-    }
-
-    fn visit_struct_field(&mut self, sf: &'ast ast::StructField) {
-        if !sf.attrs.is_empty() {
-            self.def_attrs.push((sf.id, &sf.attrs));
-        }
-
-        visit::walk_struct_field(self, sf);
     }
 }
 
@@ -284,13 +230,6 @@ pub fn handle_attrs<'a, 'tcx, 'lty>(
                 _ => {}
             }
         }
-    }
-}
-
-fn meta_item_list(meta: &ast::MetaItem) -> Result<&[ast::NestedMetaItem], &'static str> {
-    match meta.kind {
-        ast::MetaItemKind::List(ref xs) => Ok(xs),
-        _ => Err("expected MetaItemKind::List"),
     }
 }
 

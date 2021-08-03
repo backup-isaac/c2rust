@@ -7,6 +7,8 @@ use rustc::mir::*;
 use rustc::ty::{Ty, TyCtxt, TyKind, TypeAndMut};
 
 use log::Level;
+
+use super::RefdTy;
 /// Associates `Place`s corresponding to local variables with the DefId
 /// of the function in which they were defined.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd)]
@@ -53,6 +55,19 @@ pub enum Taint<'tcx> {
     ExposedPublicly,
 }
 
+impl<'tcx> Taint<'tcx> {
+    /// If the user marked something as `#[reference_like(true)]`, should that
+    /// override this taint?
+    pub fn can_be_overridden_by_user(&self) -> bool {
+        match *self {
+            Self::UsedInArithmetic
+            | Self::UsedInPtrCast
+            | Self::PassedToKnownTaintedFn(_) => false,
+            _ => true,
+        }
+    }
+}
+
 pub struct Constraints<'tcx> {
     pub edges: HashSet<Constraint<'tcx>>,
     taints: HashMap<QualifiedPlace<'tcx>, Taint<'tcx>>,
@@ -81,6 +96,60 @@ impl<'tcx> Constraints<'tcx> {
                 );
             }
             TyKind::Ref(_, _, _) => unimplemented!(),
+            _ => {},
+        }
+    }
+
+    pub fn add_place_taint_conditional<'lty>(
+        &mut self,
+        tcx: TyCtxt<'tcx>,
+        place: Place<'tcx>,
+        def_id: DefId,
+        reason: Taint<'tcx>,
+        lty: RefdTy<'lty, 'tcx>,
+    ) {
+        match lty.ty.kind {
+            TyKind::Array(_, _)
+            | TyKind::Slice(_) => self.add_place_taint_conditional(
+                tcx,
+                tcx.mk_place_index(place, Local::from_usize(0)),
+                def_id,
+                reason,
+                lty.args[0],
+            ),
+            TyKind::RawPtr(_) => {
+                if let Some(false) = lty.label {
+                    self.add_taint(
+                        QualifiedPlace::new(place.clone(), Some(def_id)),
+                        reason.clone(),
+                    );
+                }
+                self.add_place_taint_conditional(
+                    tcx,
+                    tcx.mk_place_deref(place),
+                    def_id,
+                    reason,
+                    lty.args[0],
+                );
+            }
+            TyKind::Ref(_, _, _) => self.add_place_taint_conditional(
+                tcx,
+                tcx.mk_place_deref(place),
+                def_id,
+                reason,
+                lty.args[0],
+            ),
+            TyKind::Tuple(_) => {
+                for (i, field_ty) in lty.ty.tuple_fields().enumerate() {
+                    self.add_place_taint_conditional(
+                        tcx,
+                        tcx.mk_place_field(place.clone(), Field::from_usize(i), field_ty),
+                        def_id,
+                        reason.clone(),
+                        lty.args[i],
+                    );
+                }
+            }
             _ => {},
         }
     }
