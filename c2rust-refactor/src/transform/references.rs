@@ -65,7 +65,7 @@ fn do_mark_pointers(st: &CommandState, cx: &RefactorCtxt) {
 
     type_map::map_types(&cx.hir_map(), source, &st.krate(), |_source, ast_ty, lty| {
         if let Some(reflike) = lty.label {
-            st.add_mark(ast_ty.id, (if reflike { "ref" } else { "ptr" }).into_symbol());
+            st.add_mark(ast_ty.id, reflike.mark().into_symbol());
         }
     });
 }

@@ -7,6 +7,7 @@ use rustc::mir::*;
 use rustc::ty::{Ty, TyCtxt, TyKind, TypeAndMut};
 
 use log::Level;
+
 /// Associates `Place`s corresponding to local variables with the DefId
 /// of the function in which they were defined.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd)]
@@ -29,6 +30,15 @@ impl<'tcx> QualifiedPlace<'tcx> {
 
     pub fn func(&self) -> Option<DefId> {
         self.1
+    }
+
+    /// If the place is a local variable, return its function's DefId.
+    /// Otherwise return the static's DefId.
+    pub fn as_def_id(&self) -> DefId {
+        match self.0.base {
+            PlaceBase::Local(_) => self.1.unwrap(),
+            PlaceBase::Static(ref s) => s.def_id,
+        }
     }
 }
 
