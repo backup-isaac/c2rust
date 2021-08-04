@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use arena::SyncDroplessArena;
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
+use rustc::ty::TyCtxt;
 use syntax::source_map::Span;
 
 use crate::analysis::labeled_ty::{FnSig, LabeledTy};
@@ -116,12 +117,46 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
     debug!("before propagation:");
     cx.constraints.debug_constraints();
     let (statics, functions) = cx.into_results();
+    dump_pointer_counts(&functions, tcx);
 
     AnalysisResult {
         statics,
         functions,
         arena,
     }
+}
+
+fn dump_pointer_counts<'lty, 'tcx>(functions: &HashMap<DefId, FunctionResult<'lty, 'tcx>>, tcx: TyCtxt<'tcx>) {
+    let mut total_counts = [0usize; 6];
+    eprintln!("--------------stats---------------");
+    eprintln!("{{");
+    for (&def_id, func) in functions.iter() {
+        if tcx.is_foreign_item(def_id) {
+            continue;
+        }
+        let def_str = tcx.def_path_str(def_id);
+        let mut counts = [0usize; 6];
+        for (_, &lty) in func.locals.iter() {
+            lty.for_each_label(&mut |label| if let Some(reflike) = label {
+                let index = match reflike {
+                    RefLike::UsedAsRawPtr(_) => 0,
+                    RefLike::PassedToKnownTaintedFn(_) => 1,
+                    RefLike::PassedToOpaqueFnPtr(_) => 2,
+                    RefLike::PassedToExternFn(_) => 3,
+                    RefLike::ExposedPublicly => 4,
+                    RefLike::ReferenceLike => 5,
+                };
+                counts[index] += 1;
+            });
+        }
+        eprintln!("  \"{}\": {:?},", def_str, counts);
+        for (i, count) in counts.into_iter().enumerate() {
+            total_counts[i] += count;
+        }
+    }
+    eprintln!("  \"total\": {:?},", total_counts);
+    eprintln!("  \"meaning\": [\"UsedAsRawPtr\", \"PassedToKnownTaintedFn\", \"PassedToOpaqueFnPtr\", \"PassedToExternFn\", \"ExposedPublicly\", \"RefLike\"]");
+    eprintln!("}}");
 }
 
 /// The collected results of running the analysis.
