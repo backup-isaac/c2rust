@@ -15,7 +15,7 @@ use crate::analysis::labeled_ty::{FnSig, LabeledTyCtxt};
 use crate::analysis::references::std_taints::get_function_taints;
 use crate::analysis::ty::names_c_void;
 
-use super::{FunctionResult, RefLike, RefdTy};
+use super::{FunctionResult, RawPtrUsage, RefLike, RefdTy};
 use super::constraint::{Constraints, Taint};
 use super::func::FuncCtxt;
 
@@ -262,6 +262,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
         debug!("tainted values:");
         for (tainted, reason) in tainted_values {
             let place = tainted.place();
+            debug!("  {:?}: {:?}", tainted, reason);
             match place.base {
                 PlaceBase::Local(l) => {
                     let locals = functions
@@ -272,6 +273,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                     let locals = locals.expect("QualifiedPlace referes to unknown function");
                     let base_lty = locals[l].node;
                     let modified_lty = taint_lty(
+                        reason,
                         &lcx,
                         &tcx,
                         &mut statics,
@@ -289,6 +291,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                         let base_lty = *statics.entry(s.def_id)
                             .or_insert_with(|| lcx.label(tcx.type_of(s.def_id), &mut |ty| apply_initial_label(tcx, ty)));
                         let modified_lty = taint_lty(
+                            reason,
                             &lcx,
                             &tcx,
                             &mut statics,
@@ -304,7 +307,6 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
                     StaticKind::Promoted(_, _) => todo!(),
                 },
             }
-            debug!("  {:?}: {:?}", tainted, reason);
         }
 
         // This circumvents the taints-and-constraints machinery to mark the struct fields _after_ everything
@@ -371,6 +373,7 @@ impl<'lty, 'a: 'lty, 'tcx: 'a> Ctxt<'lty, 'tcx> {
 }
 
 fn taint_lty<'lty, 'tcx>(
+    taint: Taint<'tcx>,
     lcx: &LabeledTyCtxt<'lty, Option<RefLike>>,
     tcx: &TyCtxt<'tcx>,
     statics: &mut HashMap<DefId, RefdTy<'lty, 'tcx>>,
@@ -388,6 +391,7 @@ fn taint_lty<'lty, 'tcx>(
             | ProjectionElem::Index(_)
             | ProjectionElem::ConstantIndex { .. } => {
                 let tainted_arg = taint_lty(
+                    taint,
                     lcx,
                     tcx,
                     statics,
@@ -411,6 +415,7 @@ fn taint_lty<'lty, 'tcx>(
                     let field_lty = *statics.entry(field_def.did)
                         .or_insert_with(|| lcx.label(tcx.type_of(field_def.did), &mut |ty| apply_initial_label(*tcx, ty)));
                     let tainted_field = taint_lty(
+                        taint,
                         lcx,
                         tcx,
                         statics,
@@ -428,6 +433,7 @@ fn taint_lty<'lty, 'tcx>(
                 TyKind::Tuple(_) => {
                     let i = f.index();
                     let tainted_arg = taint_lty(
+                        taint,
                         lcx,
                         tcx,
                         statics,
@@ -445,6 +451,7 @@ fn taint_lty<'lty, 'tcx>(
                 _ => unimplemented!(),
             },
             ProjectionElem::Downcast(_, variant) => taint_lty(
+                taint,
                 lcx,
                 tcx,
                 statics,
@@ -456,8 +463,13 @@ fn taint_lty<'lty, 'tcx>(
             ProjectionElem::Subslice { .. } => unimplemented!(),
         }
     } else {
-        if let Some(_) = lty.label {
-            lcx.mk(lty.ty, lty.args, Some(false))
+        if let Some(existing_label) = lty.label {
+            let new_label = taint.into();
+            if new_label < existing_label {
+                lcx.mk(lty.ty, lty.args, Some(new_label))
+            } else {
+                lty
+            }
         } else {
             lty
         }
@@ -467,7 +479,11 @@ fn taint_lty<'lty, 'tcx>(
 fn apply_initial_label<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<RefLike> {
     match ty.kind {
         // TODO: does this also need TyKind::Ref?
-        TyKind::RawPtr(TypeAndMut { ty: pointee_ty, .. }) => Some(!names_c_void(tcx, pointee_ty)), // void* should never be reflike
+        TyKind::RawPtr(TypeAndMut { ty: pointee_ty, .. }) => if names_c_void(tcx, pointee_ty) {
+            Some(RefLike::UsedAsRawPtr(RawPtrUsage::VoidPtr))
+        } else {
+            Some(RefLike::ReferenceLike)
+        },
         TyKind::FnDef(def_id, _) => {
             debug!("nested? def {:?}", def_id);
             unimplemented!()
@@ -479,7 +495,7 @@ fn apply_initial_label<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<RefLike>
 fn publicly_exposed<'tcx>(ty: Ty<'tcx>) -> Option<RefLike> {
     match ty.kind {
         // TODO: does this also need TyKind::Ref?
-        TyKind::RawPtr(_) => Some(false),
+        TyKind::RawPtr(_) => Some(RefLike::ExposedPublicly),
         TyKind::FnDef(def_id, _) => {
             debug!("nested? def {:?}", def_id);
             unimplemented!()

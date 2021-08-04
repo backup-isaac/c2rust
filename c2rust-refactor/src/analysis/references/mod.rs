@@ -14,9 +14,77 @@ mod context;
 mod func;
 mod std_taints;
 
+use self::constraint::{QualifiedPlace, Taint};
 use self::context::Ctxt;
 
-pub type RefLike = bool;
+#[derive(Clone, Copy, Debug)]
+pub enum RawPtrUsage {
+    Arithmetic,
+    Cast,
+    // While it is possible to compile Rust that writes e.g. &mut libc::c_void, doing so is semantically wrong.
+    VoidPtr,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RefLike {
+    UsedAsRawPtr(RawPtrUsage),
+    PassedToKnownTaintedFn(DefId),
+    PassedToOpaqueFnPtr(DefId),
+    PassedToExternFn(DefId),
+    ExposedPublicly,
+    ReferenceLike,
+}
+
+impl<'tcx> RefLike {
+    pub fn mark(&self) -> &'static str {
+        match self {
+            Self::UsedAsRawPtr(_) => "raw",
+            Self::PassedToKnownTaintedFn(_) => "arg_tainted",
+            Self::PassedToOpaqueFnPtr(_) => "arg_fn_ptr",
+            Self::PassedToExternFn(_) => "arg_extern",
+            Self::ExposedPublicly => "pub",
+            Self::ReferenceLike => "ref",
+        }
+    }
+
+    /// I can't rely on the ordering given by std::mem::discriminant, so this is a helper
+    /// to make PartialEq and PartialOrd less verbose
+    fn integral_value(&self) -> u8 {
+        match self {
+            Self::UsedAsRawPtr(_) => 0,
+            Self::PassedToKnownTaintedFn(_) => 1,
+            Self::PassedToOpaqueFnPtr(_) => 2,
+            Self::PassedToExternFn(_) => 3,
+            Self::ExposedPublicly => 4,
+            Self::ReferenceLike => 5,
+        }
+    }
+}
+
+impl<'tcx> PartialEq for RefLike {
+    fn eq(&self, other: &Self) -> bool {
+        self.integral_value() == other.integral_value()
+    }
+}
+
+impl<'tcx> PartialOrd for RefLike {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.integral_value().partial_cmp(&other.integral_value())
+    }
+}
+
+impl<'tcx> From<Taint<'tcx>> for RefLike {
+    fn from(taint: Taint<'tcx>) -> Self {
+        match taint {
+            Taint::UsedInArithmetic => Self::UsedAsRawPtr(RawPtrUsage::Arithmetic),
+            Taint::UsedInPtrCast => Self::UsedAsRawPtr(RawPtrUsage::Cast),
+            Taint::PassedToKnownTaintedFn(def_id) => Self::PassedToKnownTaintedFn(def_id),
+            Taint::PassedToOpaqueFnPointer(fn_ptr) => Self::PassedToOpaqueFnPtr(fn_ptr.as_def_id()),
+            Taint::PassedToExternFn(def_id) => Self::PassedToExternFn(def_id),
+            Taint::ExposedPublicly => Self::ExposedPublicly,
+        }
+    }
+}
 
 /// A type where pointers are labeled as reference-like or not.
 pub type RefdTy<'lty, 'tcx> = LabeledTy<'lty, 'tcx, Option<RefLike>>;
