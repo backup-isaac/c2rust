@@ -17,42 +17,42 @@ use crate::RefactorCtxt;
 
 
 /// # `link_funcs` Command
-/// 
+///
 /// Usage: `link_funcs`
-/// 
+///
 /// Link up function declarations and definitions with matching symbols across
 /// modules.  For every foreign `fn` whose symbol matches a `fn` definition
 /// elsewhere in the program, it replaces all uses of the foreign `fn` with a
 /// direct call of the `fn` definition, and deletes the foreign `fn`.
-/// 
+///
 /// Example:
-/// 
+///
 /// ```ignore
 ///     mod a {
 ///         #[no_mangle]
 ///         unsafe extern "C" fn foo() { ... }
 ///     }
-/// 
+///
 ///     mod b {
 ///         extern "C" {
 ///             // This resolves to `a::foo` during linking.
 ///             fn foo();
 ///         }
-/// 
+///
 ///         unsafe fn use_foo() {
 ///             foo();
 ///         }
 ///     }
 /// ```
-/// 
+///
 /// After running `link_funcs`:
-/// 
+///
 /// ```ignore
 ///     mod a {
 ///         #[no_mangle]
 ///         unsafe extern "C" fn foo() { ... }
 ///     }
-/// 
+///
 ///     mod b {
 ///         // 1. Foreign fn `foo` has been deleted
 ///         unsafe fn use_foo() {
@@ -117,37 +117,37 @@ impl Transform for LinkFuncs {
 
 
 /// # `link_incomplete_types` Command
-/// 
+///
 /// Usage: `link_incomplete_types`
-/// 
+///
 /// Link up type declarations and definitions with matching names across modules.
 /// For every foreign type whose name matches a type definition elsewhere in the
 /// program, it replaces all uses of the foreign type with the type definition, and
 /// deletes the foreign type.
-/// 
+///
 /// Example:
-/// 
+///
 /// ```ignore
 ///     mod a {
 ///         struct Foo { ... }
 ///     }
-/// 
+///
 ///     mod b {
 ///         extern "C" {
 ///             type Foo;
 ///         }
-/// 
+///
 ///         unsafe fn use_foo(x: &Foo) { ... }
 ///     }
 /// ```
-/// 
+///
 /// After running `link_incomplete_types`:
-/// 
+///
 /// ```ignore
 ///     mod a {
 ///         struct Foo { ... }
 ///     }
-/// 
+///
 ///     mod b {
 ///         // 1. Foreign fn `Foo` has been deleted
 ///         // 2. `use_foo` now references `Foo` directly
@@ -210,45 +210,45 @@ impl Transform for LinkIncompleteTypes {
 
 
 /// # `canonicalize_structs` Command
-/// 
+///
 /// Usage: `canonicalize_structs`
-/// 
+///
 /// Marks: `target`
-/// 
+///
 /// For each type definition marked `target`, delete all other type definitions
 /// with the same name, and replace their uses with uses of the `target` type.
-/// 
-/// This only works when all the identically-named types have the same definition, 
+///
+/// This only works when all the identically-named types have the same definition,
 /// such as when all are generated from `#include`s of the same C header.
-/// 
+///
 /// Example:
-/// 
+///
 /// ```ignore
 ///     mod a {
 ///         pub struct Foo { ... }  // Foo: target
 ///     }
-/// 
+///
 ///     mod b {
 ///         struct Foo { ... }  // same as ::a::Foo
-/// 
+///
 ///         unsafe fn use_foo(x: &Foo) { ... }
 ///     }
 /// ```
-/// 
+///
 /// After running `canonicalize_structs`:
-/// 
+///
 /// ```ignore
 ///     mod a {
 ///         pub struct Foo { ... }
 ///     }
-/// 
+///
 ///     mod b {
 ///         // 1. `struct Foo` has been deleted
 ///         // 2. `use_foo` now references `::a::Foo` directly
 ///         unsafe fn use_foo(x: &::a::Foo) { ... }
 ///     }
 /// ```
-/// 
+///
 /// Note that this transform does not check or adjust item visibility.  If the
 /// `target` type is not visible throughout the crate, this may introduce compile
 /// errors.
@@ -272,7 +272,7 @@ impl Transform for CanonicalizeStructs {
 
         FlatMapNodes::visit(krate, |i: P<Item>| {
             let should_remove = match i.kind {
-                ItemKind::Struct(..) => {
+                ItemKind::Struct(..) | ItemKind::Union(..) => {
                     if let Some(&canon_def_id) = canon_ids.get(&i.ident.name) {
                         let def_id = cx.node_def_id(i.id);
                         if def_id != canon_def_id {
