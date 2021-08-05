@@ -1,7 +1,10 @@
+use std::collections::HashSet;
+
 use rustc::hir::def_id::DefId;
 use rustc::mir::*;
 use rustc::mir::interpret::{ConstValue, Scalar};
 use rustc::ty::{ConstKind, Ty, TyKind, TypeAndMut, TyS};
+use rustc_target::abi::VariantIdx;
 
 use crate::analysis::references::constraint::Taint;
 use crate::analysis::ty::names_c_void;
@@ -35,6 +38,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
         to: Place<'tcx>,
         to_def_id: DefId,
         ty: Ty<'tcx>,
+        adts_visited: &mut HashSet<Ty<'tcx>>,
     ) -> bool {
         match ty.kind {
             TyKind::Array(inner_ty, _)
@@ -45,7 +49,8 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                 from_def_id,
                 self.cx.tcx.mk_place_index(to, Local::from_usize(0)),
                 to_def_id,
-                inner_ty
+                inner_ty,
+                adts_visited,
             ),
             TyKind::RawPtr(TypeAndMut { ty, .. }) => {
                 let c = Constraint {
@@ -60,7 +65,8 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                     from_def_id,
                     self.cx.tcx.mk_place_deref(to),
                     to_def_id,
-                    ty
+                    ty,
+                    adts_visited,
                 );
 
                 added
@@ -70,9 +76,11 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                 from_def_id,
                 self.cx.tcx.mk_place_deref(to),
                 to_def_id,
-                inner_ty
+                inner_ty,
+                adts_visited,
             ),
             TyKind::Tuple(_) => {
+                debug!("tuple {:?} {:?} ==> {:?}", ty, from, to);
                 let mut added = false;
                 for (i, field_ty) in ty.tuple_fields().enumerate() {
                     added |= self.add_place_constraints_recursive(
@@ -80,9 +88,30 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                         from_def_id,
                         self.cx.tcx.mk_place_field(to.clone(), Field::from_usize(i), field_ty),
                         to_def_id,
-                        field_ty
+                        field_ty,
+                        adts_visited,
                     );
                 }
+                added
+            },
+            TyKind::Adt(adt, _) => if !adts_visited.insert(ty) {
+                false
+            } else {
+                let mut added = false;
+                if adt.is_struct() {
+                    let variant = &adt.variants[VariantIdx::from_usize(0)];
+                    for (i, field) in variant.fields.iter().enumerate() {
+                        let field_ty = self.cx.tcx.type_of(field.did);
+                        added |= self.add_place_constraints_recursive(
+                            self.cx.tcx.mk_place_field(from.clone(), Field::from_usize(i), field_ty),
+                            from_def_id,
+                            self.cx.tcx.mk_place_field(to.clone(), Field::from_usize(i), field_ty),
+                            to_def_id,
+                            field_ty,
+                            adts_visited,
+                        );
+                    }
+                } // TODO: else downcast each variant
                 added
             },
             _ => false,
@@ -103,6 +132,7 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
 
     fn add_place_constraints(&mut self, from: &Place<'tcx>, to: &Place<'tcx>) {
         let from_ty = from.ty(self.mir, self.cx.tcx).ty;
+        let mut adts_visited = HashSet::new();
         if let TyKind::RawPtr(TypeAndMut { ty, .. }) = from_ty.kind {
             if names_c_void(self.cx.tcx, ty) {
                 self.add_place_constraints_recursive(
@@ -110,7 +140,8 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                     self.def_id,
                     to.clone(),
                     self.def_id,
-                    from_ty
+                    from_ty,
+                    &mut adts_visited,
                 );
                 return;
             }
@@ -122,7 +153,8 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
             self.def_id,
             to.clone(),
             self.def_id,
-            to_ty
+            to_ty,
+            &mut adts_visited,
         );
     }
 
@@ -318,13 +350,17 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                         debug!("        constraint(a) {}::{:?} --> {:?}", fn_str, callee_place, arg);
                         depend_on_fn_analysis |= match arg {
                             Operand::Copy(place)
-                            | Operand::Move(place) => self.add_place_constraints_recursive(
-                                callee_place,
-                                fn_def_id,
-                                place.clone(),
-                                self.def_id,
-                                place.ty(self.mir, self.cx.tcx).ty,
-                            ),
+                            | Operand::Move(place) => {
+                                let mut adts_visited = HashSet::new();
+                                self.add_place_constraints_recursive(
+                                    callee_place,
+                                    fn_def_id,
+                                    place.clone(),
+                                    self.def_id,
+                                    place.ty(self.mir, self.cx.tcx).ty,
+                                    &mut adts_visited,
+                                )
+                            },
                             Operand::Constant(_) => false,
                         };
                     }
@@ -337,12 +373,14 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                                     projection: self.cx.tcx.intern_place_elems(&[]),
                                 };
                                 debug!("        constraint(r) {:?} --> {}::{:?}", retval, fn_str, callee_place);
+                                let mut adts_visited = HashSet::new();
                                 self.add_place_constraints_recursive(
                                     retval.clone(),
                                     self.def_id,
                                     callee_place,
                                     fn_def_id,
                                     retval.ty(self.mir, self.cx.tcx).ty,
+                                    &mut adts_visited,
                                 );
                             }
                         }

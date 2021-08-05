@@ -14,7 +14,7 @@ mod context;
 mod func;
 mod std_taints;
 
-use self::constraint::{QualifiedPlace, Taint};
+use self::constraint::Taint;
 use self::context::Ctxt;
 
 #[derive(Clone, Copy, Debug)]
