@@ -126,10 +126,32 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
     }
 }
 
+fn count_pointers<'lty, 'tcx>(
+    lty: RefdTy<'lty, 'tcx>,
+    counts: &mut [usize; 6],
+    externs: &mut BTreeMap<DefId, usize>,
+) {
+    lty.for_each_label(&mut |label| if let Some(reflike) = label {
+        let index = match reflike {
+            RefLike::UsedAsRawPtr(_) => 0,
+            RefLike::PassedToKnownTaintedFn(_) => 1,
+            RefLike::PassedToOpaqueFnPtr(_) => 2,
+            RefLike::PassedToExternFn(_) => 3,
+            RefLike::ExposedPublicly => 4,
+            RefLike::ReferenceLike => 5,
+        };
+        counts[index] += 1;
+        if let RefLike::PassedToExternFn(ext_def_id) = reflike {
+            externs.entry(*ext_def_id)
+                .and_modify(|c| *c += 1 )
+                .or_insert(1usize);
+        }
+    });
+}
+
 fn dump_pointer_counts<'lty, 'tcx>(functions: &HashMap<DefId, FunctionResult<'lty, 'tcx>>, tcx: TyCtxt<'tcx>) {
     let mut total_counts = [0usize; 6];
     eprintln!("--------------stats---------------");
-    eprintln!("\"funcs:\": {{");
 
     let mut funcs = BTreeMap::new();
     let mut externs = BTreeMap::new();
@@ -139,28 +161,16 @@ fn dump_pointer_counts<'lty, 'tcx>(functions: &HashMap<DefId, FunctionResult<'lt
         }
         let mut counts = [0usize; 6];
         for (_, &lty) in func.locals.iter() {
-            lty.for_each_label(&mut |label| if let Some(reflike) = label {
-                let index = match reflike {
-                    RefLike::UsedAsRawPtr(_) => 0,
-                    RefLike::PassedToKnownTaintedFn(_) => 1,
-                    RefLike::PassedToOpaqueFnPtr(_) => 2,
-                    RefLike::PassedToExternFn(_) => 3,
-                    RefLike::ExposedPublicly => 4,
-                    RefLike::ReferenceLike => 5,
-                };
-                counts[index] += 1;
-                if let RefLike::PassedToExternFn(ext_def_id) = reflike {
-                    externs.entry(*ext_def_id)
-                        .and_modify(|c| *c += 1 )
-                        .or_insert(1usize);
-                }
-            });
+            count_pointers(lty, &mut counts, &mut externs);
         }
+        count_pointers(func.sig.output, &mut counts, &mut externs);
+
         funcs.insert(def_id, counts);
         for (i, count) in counts.iter().enumerate() {
             total_counts[i] += count;
         }
     }
+    eprintln!("\"funcs:\": {{");
     for (def_id, counts) in funcs {
         eprintln!("  \"{}\": {:?},", tcx.def_path_str(def_id), counts);
     }
