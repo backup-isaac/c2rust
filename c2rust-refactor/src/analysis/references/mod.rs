@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use arena::SyncDroplessArena;
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
@@ -129,12 +129,14 @@ pub fn analyze<'lty, 'a: 'lty, 'tcx: 'a>(
 fn dump_pointer_counts<'lty, 'tcx>(functions: &HashMap<DefId, FunctionResult<'lty, 'tcx>>, tcx: TyCtxt<'tcx>) {
     let mut total_counts = [0usize; 6];
     eprintln!("--------------stats---------------");
-    eprintln!("{{");
+    eprintln!("\"funcs:\": {{");
+
+    let mut funcs = BTreeMap::new();
+    let mut externs = BTreeMap::new();
     for (&def_id, func) in functions.iter() {
         if tcx.is_foreign_item(def_id) {
             continue;
         }
-        let def_str = tcx.def_path_str(def_id);
         let mut counts = [0usize; 6];
         for (_, &lty) in func.locals.iter() {
             lty.for_each_label(&mut |label| if let Some(reflike) = label {
@@ -147,15 +149,27 @@ fn dump_pointer_counts<'lty, 'tcx>(functions: &HashMap<DefId, FunctionResult<'lt
                     RefLike::ReferenceLike => 5,
                 };
                 counts[index] += 1;
+                if let RefLike::PassedToExternFn(ext_def_id) = reflike {
+                    externs.entry(*ext_def_id)
+                        .and_modify(|c| *c += 1 )
+                        .or_insert(1usize);
+                }
             });
         }
-        eprintln!("  \"{}\": {:?},", def_str, counts);
-        for (i, count) in counts.into_iter().enumerate() {
+        funcs.insert(def_id, counts);
+        for (i, count) in counts.iter().enumerate() {
             total_counts[i] += count;
         }
     }
+    for (def_id, counts) in funcs {
+        eprintln!("  \"{}\": {:?},", tcx.def_path_str(def_id), counts);
+    }
     eprintln!("  \"total\": {:?},", total_counts);
     eprintln!("  \"meaning\": [\"UsedAsRawPtr\", \"PassedToKnownTaintedFn\", \"PassedToOpaqueFnPtr\", \"PassedToExternFn\", \"ExposedPublicly\", \"RefLike\"]");
+    eprintln!("}}, \"externs\": {{");
+    for (def_id, count) in externs {
+        eprintln!("  \"{}\": {},", tcx.def_path_str(def_id), count);
+    }
     eprintln!("}}");
 }
 
