@@ -111,7 +111,29 @@ impl<'c, 'lty, 'a: 'lty, 'tcx: 'a> FuncCtxt<'c, 'lty, 'a, 'tcx> {
                             adts_visited,
                         );
                     }
-                } // TODO: else downcast each variant
+                } else {
+                    for (vi, variant) in adt.variants.iter().enumerate() {
+                        for (fi, field) in variant.fields.iter().enumerate() {
+                            let field_ty = self.cx.tcx.type_of(field.did);
+                            added |= self.add_place_constraints_recursive(
+                                self.cx.tcx.mk_place_field(
+                                    self.cx.tcx.mk_place_downcast(from.clone(), adt, VariantIdx::from_usize(vi)),
+                                    Field::from_usize(fi),
+                                    field_ty,
+                                ),
+                                from_def_id,
+                                self.cx.tcx.mk_place_field(
+                                    self.cx.tcx.mk_place_downcast(to.clone(), adt, VariantIdx::from_usize(vi)),
+                                    Field::from_usize(fi),
+                                    field_ty,
+                                ),
+                                to_def_id,
+                                field_ty,
+                                adts_visited,
+                            );
+                        }
+                    }
+                }
                 added
             },
             _ => false,
